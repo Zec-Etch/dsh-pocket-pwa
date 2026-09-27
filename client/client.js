@@ -120,6 +120,16 @@ function buildAccessUrl(cfg) {
   return `${proto}://${host}${needPort ? `:${port}` : ""}`;
 }
 var NOTIFY_PRESETS = ["generic", "wecom", "dingtalk", "feishu", "ntfy", "bark"];
+var SSH_TAIL_LINES = 5;
+var SSH_TAIL_LINE_MAX = 500;
+var PEM_BLOCK_RE = /-----BEGIN[\s\S]*?-----END[^-]*-----/g;
+var KEY_PATH_RE = /(?:~|[/\\])?[^\s"'=:]*\.ssh[/\\][^\s"'=]*|(?:^|[\s"'=(])(?:id_(?:rsa|dsa|ecdsa|ed25519))(?:\.pub)?/gi;
+function scrubKeyMaterial(text) {
+  return String(text ?? "").replace(PEM_BLOCK_RE, "[redacted private key]").replace(KEY_PATH_RE, "[redacted key path]");
+}
+function intOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
+}
 function redactSsh(ssh) {
   const c = ssh?.config ?? {};
   const config = {
@@ -134,12 +144,30 @@ function redactSsh(ssh) {
     autoRestore: c.autoRestore !== false
   };
   const url = ssh?.url ?? buildAccessUrl({ ...config, host: config.accessHost || config.host });
+  const evidence = ssh?.evidence === "forward-ok" || ssh?.evidence === "grace" ? ssh.evidence : null;
+  const attempts = intOrNull(ssh?.attempts) ?? 0;
+  const nextRetryInMs = intOrNull(ssh?.nextRetryInMs);
+  const stderrTail = Array.isArray(ssh?.stderrTail) ? ssh.stderrTail.slice(-SSH_TAIL_LINES).map((line) => scrubKeyMaterial(line).slice(0, SSH_TAIL_LINE_MAX)) : [];
+  const rawTarget = ssh?.target;
+  const target = rawTarget && typeof rawTarget === "object" && !Array.isArray(rawTarget) ? {
+    host: typeof rawTarget.host === "string" ? rawTarget.host : "",
+    user: typeof rawTarget.user === "string" ? rawTarget.user : "",
+    port: intOr(rawTarget.port, 22),
+    remote: typeof rawTarget.remote === "string" ? rawTarget.remote : null,
+    local: typeof rawTarget.local === "string" ? rawTarget.local : null
+  } : null;
   return {
     running: ssh?.running === true,
     state: typeof ssh?.state === "string" ? ssh.state : "idle",
     url,
     qr: ssh?.qr ?? null,
-    lastError: ssh?.lastError ?? null,
+    // lastError 是 ssh 的原文诊断：同样过一遍私钥材料清洗（路径→占位符，其余原样）
+    lastError: ssh?.lastError == null ? null : scrubKeyMaterial(ssh.lastError),
+    evidence,
+    attempts,
+    nextRetryInMs,
+    stderrTail,
+    target,
     config
   };
 }

@@ -97,7 +97,37 @@ export function buildAccessUrl(cfg) {
 
 const NOTIFY_PRESETS = ['generic', 'wecom', 'dingtalk', 'feishu', 'ntfy', 'bark'];
 
-/** SSH 通道状态（白名单：私钥路径只回 keyPathSet，绝不回原文）。 */
+/** stderr 尾巴的展示上限（与 lib/ssh-channel.mjs 的 STDERR_TAIL_LINES/LINE_MAX 保持一致）。 */
+const SSH_TAIL_LINES = 5;
+const SSH_TAIL_LINE_MAX = 500;
+/** 诊断文本里的私钥相关材料：PEM 块 / .ssh 下的密钥路径 / 裸 id_xxx 文件名。 */
+const PEM_BLOCK_RE = /-----BEGIN[\s\S]*?-----END[^-]*-----/g;
+const KEY_PATH_RE = /(?:~|[/\\])?[^\s"'=:]*\.ssh[/\\][^\s"'=]*|(?:^|[\s"'=(])(?:id_(?:rsa|dsa|ecdsa|ed25519))(?:\.pub)?/gi;
+/**
+ * 只用于诊断文本（stderrTail / lastError）：把私钥路径与 PEM 块替换成占位符。
+ * ssh -v 会打印 `identity file ~/.ssh/id_ed25519 type 3`，路径本身不是密钥，
+ * 但「status 里不出现私钥路径」是白名单的底线；替换后 `identity file [redacted key path] type 3`
+ * 仍保留了排障信息。普通行（vps.example.com / 127.0.0.1:7788 等）不会被误伤。
+ */
+function scrubKeyMaterial(text) {
+  return String(text ?? '')
+    .replace(PEM_BLOCK_RE, '[redacted private key]')
+    .replace(KEY_PATH_RE, '[redacted key path]');
+}
+
+/** 诊断字段用的严格整数：只认 number（字符串/NaN/负数一律降级），避免把脏数据透给 UI。 */
+function intOrNull(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
+}
+
+/**
+ * SSH 通道状态（白名单：私钥路径只回 keyPathSet，绝不回原文）。
+ *
+ * 诊断字段（evidence / attempts / nextRetryInMs / stderrTail / target）与 ssh.status RPC
+ * 保持对等——否则 3 秒轮询的 pocket.status 里看不到重连倒计时与 stderr 尾巴。
+ * 输入缺失或类型不对时一律降级为默认值（null / 0 / []），绝不抛错：旧宿主（status 里
+ * 没有这些字段）必须照旧显示。
+ */
 function redactSsh(ssh) {
   const c = ssh?.config ?? {};
   const config = {
@@ -113,12 +143,38 @@ function redactSsh(ssh) {
   };
   // 宿主未给 url 时按同一规则本地拼（旧版本/运行前也能显示要用的地址）
   const url = ssh?.url ?? buildAccessUrl({ ...config, host: config.accessHost || config.host });
+  // connected 的证据：只认这两个结构化取值，其它（含旧宿主的缺失值）一律 null
+  const evidence = ssh?.evidence === 'forward-ok' || ssh?.evidence === 'grace' ? ssh.evidence : null;
+  const attempts = intOrNull(ssh?.attempts) ?? 0;
+  const nextRetryInMs = intOrNull(ssh?.nextRetryInMs);
+  // stderr 尾巴：最多 5 行、每行 500 字符（宿主已限长，这里再兜一次，防旧宿主/手改 JSON），
+  // 并把私钥路径/PEM 换成占位符（见 scrubKeyMaterial）
+  const stderrTail = Array.isArray(ssh?.stderrTail)
+    ? ssh.stderrTail.slice(-SSH_TAIL_LINES).map((line) => scrubKeyMaterial(line).slice(0, SSH_TAIL_LINE_MAX))
+    : [];
+  // 目标视图：逐字段白名单（**结构上不可能带出 keyPath 等私钥材料**）
+  const rawTarget = ssh?.target;
+  const target = rawTarget && typeof rawTarget === 'object' && !Array.isArray(rawTarget)
+    ? {
+      host: typeof rawTarget.host === 'string' ? rawTarget.host : '',
+      user: typeof rawTarget.user === 'string' ? rawTarget.user : '',
+      port: intOr(rawTarget.port, 22),
+      remote: typeof rawTarget.remote === 'string' ? rawTarget.remote : null,
+      local: typeof rawTarget.local === 'string' ? rawTarget.local : null,
+    }
+    : null;
   return {
     running: ssh?.running === true,
     state: typeof ssh?.state === 'string' ? ssh.state : 'idle',
     url,
     qr: ssh?.qr ?? null,
-    lastError: ssh?.lastError ?? null,
+    // lastError 是 ssh 的原文诊断：同样过一遍私钥材料清洗（路径→占位符，其余原样）
+    lastError: ssh?.lastError == null ? null : scrubKeyMaterial(ssh.lastError),
+    evidence,
+    attempts,
+    nextRetryInMs,
+    stderrTail,
+    target,
     config,
   };
 }

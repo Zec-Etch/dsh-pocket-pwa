@@ -148,6 +148,12 @@ test('redactStatus：旧宿主不返回新字段时不崩，且给出可用默�
     url: null,
     qr: null,
     lastError: null,
+    // task-19：诊断字段与 ssh.status 对等（旧宿主缺失 → 默认值）
+    evidence: null,
+    attempts: 0,
+    nextRetryInMs: null,
+    stderrTail: [],
+    target: null,
     config: {
       host: '', port: 22, user: '', keyPathSet: false, remoteBindPort: 7788,
       accessProtocol: 'https', accessHost: '', accessPort: 0, autoRestore: true,
@@ -165,17 +171,79 @@ test('redactStatus：旧宿主不返回新字段时不崩，且给出可用默�
 
 test('redactStatus：私钥路径 / webhook 密钥 / 设备机密都不外泄', () => {
   const s = redactStatus({
-    ssh: { running: true, state: 'connected', config: { host: 'vps.example.com', user: 'dsh', keyPath: '/home/u/.ssh/id_ed25519', keyPathSet: true } },
+    ssh: {
+      running: true, state: 'connected',
+      // task-19：诊断字段透出的同时，任何位置的私钥材料都必须被挡住
+      evidence: 'forward-ok', attempts: 3, nextRetryInMs: 1500,
+      stderrTail: [
+        'debug1: identity file /home/u/.ssh/id_ed25519 type 3',
+        '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3NzaC1yc2E=\n-----END OPENSSH PRIVATE KEY-----',
+      ],
+      target: { host: 'vps.example.com', user: 'dsh', port: 22, remote: '127.0.0.1:7788', local: '127.0.0.1:3081', keyPath: '/home/u/.ssh/id_ed25519' },
+      privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----AAAAB3NzaC1yc2E=-----END OPENSSH PRIVATE KEY-----',
+      config: { host: 'vps.example.com', user: 'dsh', keyPath: '/home/u/.ssh/id_ed25519', keyPathSet: true, privateKey: 'leaked' },
+    },
     notify: { webhookSecret: 'super-secret', webhookUrl: 'https://hook.example.com/x', webhookConfigured: true },
     passkey: { enabled: true, rpId: 'dsh.example.com', deviceCount: 1, devices: [{ id: 'd1', token: 'plaintext' }] },
   });
   assert.equal(s.ssh.config.keyPath, undefined, '私钥路径不回显（只回 keyPathSet）');
   assert.equal(s.ssh.config.keyPathSet, true);
+  assert.equal(s.ssh.target.keyPath, undefined, 'target 逐字段白名单：白名单外的字段一律丢弃');
+  assert.equal(s.ssh.target.host, 'vps.example.com', 'target 白名单字段照常透出');
+  assert.equal(s.ssh.privateKey, undefined, '顶层未知字段不进白名单');
   assert.equal(s.notify.webhookSecret, undefined, 'webhook 密钥不回显（只回 webhookConfigured）');
   assert.equal(s.notify.webhookConfigured, true);
   assert.equal(s.passkey.devices, undefined, '设备列表不进 status（走 passkey.list）');
   assert.ok(!JSON.stringify(s).includes('super-secret'), '序列化后不得出现密钥明文');
   assert.ok(!JSON.stringify(s).includes('id_ed25519'), '序列化后不得出现私钥路径');
+  // task-19 强化：keyPath 字段名本身也不许出现在序列化结果里（keyPathSet 不算）
+  assert.ok(!/"keyPath"\s*:/.test(JSON.stringify(s)), '序列化后不得出现 keyPath 字段');
+  assert.ok(!/BEGIN [A-Z ]*PRIVATE KEY/.test(JSON.stringify(s)), '序列化后不得出现私钥块（诊断文本也要清洗）');
+  // 清洗是有损但可读的：路径变占位符，诊断信息保留
+  assert.ok(s.ssh.stderrTail[0].includes('[redacted key path]'), 'stderr 尾巴里的密钥路径被替换成占位符');
+  assert.ok(s.ssh.stderrTail[0].includes('identity file'), '替换后仍保留原文的诊断语义');
+  assert.ok(s.ssh.stderrTail[0].includes('type 3'));
+  assert.ok(s.ssh.stderrTail[1].includes('[redacted private key]'), 'PEM 块被整体替换');
+});
+
+test('redactSsh（task-19）：stderrTail 裁到 5×500、evidence 只认两个结构化取值、target 逐字段收敛', () => {
+  const long = 'x'.repeat(900);
+  const s = redactStatus({
+    ssh: {
+      evidence: 'grace',
+      attempts: 3.9,
+      nextRetryInMs: 0,
+      stderrTail: ['a', 'b', 'c', long, 'e', 'f', 'g'],
+      target: { host: 'vps.example.com', user: 'dsh', port: '22', remote: null, local: '127.0.0.1:3081' },
+    },
+  });
+  assert.equal(s.ssh.evidence, 'grace', 'grace 是合法证据');
+  assert.equal(s.ssh.attempts, 3, '小数收敛为非负整数');
+  assert.equal(s.ssh.nextRetryInMs, 0, '0 是合法的非负整数（null 才表示不在退避）');
+  assert.equal(s.ssh.stderrTail.length, 5, '最多 5 条（保留最近 5 条）');
+  assert.equal(s.ssh.stderrTail[0], 'c', '从头截断，保留尾部');
+  assert.equal(s.ssh.stderrTail[1].length, 500, '单条截到 500 字符');
+  assert.equal(s.ssh.stderrTail[4], 'g', '最后一条原样保留');
+  assert.equal(s.ssh.target.port, 22, 'target.port 数字字符串按同规则解析');
+  assert.equal(s.ssh.target.remote, null, 'target.remote 非字符串 → null');
+  assert.equal(s.ssh.target.local, '127.0.0.1:3081');
+  // 非法证据值（拼错/旧值/注入）一律 null，绝不透给 UI
+  assert.equal(redactStatus({ ssh: { evidence: 'forward-ok-ish' } }).ssh.evidence, null);
+  assert.equal(redactStatus({ ssh: { evidence: true } }).ssh.evidence, null);
+  assert.equal(redactStatus({ ssh: { evidence: 'forward-ok' } }).ssh.evidence, 'forward-ok');
+});
+
+test('打包产物（task-19）：client.js 带上 redactSsh 的新字段名与清洗标记（改 api.js 必须重新打包）', () => {
+  // 与 mobile-nav.test.js 的「打包产物里带上关键字」同一思路：源码改了但忘记重新打包时，
+  // 浏览器侧拿到的还是旧白名单——这条断言把它钉死。
+  const bundle = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  for (const needle of ['stderrTail', 'nextRetryInMs', 'attempts', '[redacted key path]']) {
+    assert.ok(bundle.includes(needle), `client.js 缺 ${needle}：改完 client/api.js 要重新打包（见 client/build.mjs 的 esbuild 配置）`);
+  }
+  // 包装模板没被破坏（与 client/build.mjs 逐字一致的头尾）
+  assert.ok(bundle.startsWith('window.__ModuleLoader__.load({'), '打包产物必须是 ModuleLoader 包装');
+  assert.ok(bundle.includes('var React = require("react");'), 'React 绑定注释与语句必须保留');
+  assert.ok(bundle.trimEnd().endsWith('});'), '包装结尾完整');
 });
 
 test('redactStatus / buildAccessUrl：访问地址按 accessProtocol+accessHost(+accessPort) 拼接', () => {
@@ -193,12 +261,27 @@ test('redactStatus / buildAccessUrl：访问地址按 accessProtocol+accessHost(
 
 test('redactStatus：字段类型不对时收敛到默认值（不把字符串/NaN 透给 UI）', () => {
   const s = redactStatus({
-    ssh: { running: 'yes', state: 7, config: { port: '', remoteBindPort: 'abc', accessPort: '8080', accessProtocol: 'ftp', autoRestore: 'no' } },
+    ssh: {
+      running: 'yes', state: 7,
+      // task-19 诊断字段的类型错误也必须降级，且不抛
+      evidence: 42, attempts: '3', nextRetryInMs: '1500', stderrTail: 'not-an-array', target: 'not-an-object',
+      config: { port: '', remoteBindPort: 'abc', accessPort: '8080', accessProtocol: 'ftp', autoRestore: 'no' },
+    },
     notify: { pushEnabled: 'true', onTaskDone: 'false', subscriptionCount: 'x', webhookPreset: 'telegram', minIntervalSec: '30' },
     passkey: { enabled: 1, deviceCount: '2' },
   });
   assert.equal(s.ssh.running, false, '只认 true');
   assert.equal(s.ssh.state, 'idle');
+  assert.equal(s.ssh.evidence, null, '非字符串证据 → null');
+  assert.equal(s.ssh.attempts, 0, '字符串 attempts → 0（严格只认 number）');
+  assert.equal(s.ssh.nextRetryInMs, null, '字符串倒计时 → null');
+  assert.deepEqual(s.ssh.stderrTail, [], '非数组 stderrTail → []');
+  assert.equal(s.ssh.target, null, '非对象 target → null');
+  // 负数/NaN 同样降级（不会把 -5 或 NaN 透给 UI）
+  assert.equal(redactStatus({ ssh: { attempts: -5 } }).ssh.attempts, 0);
+  assert.equal(redactStatus({ ssh: { attempts: Number.NaN } }).ssh.attempts, 0);
+  assert.equal(redactStatus({ ssh: { nextRetryInMs: -1 } }).ssh.nextRetryInMs, null);
+  assert.equal(redactStatus({ ssh: { nextRetryInMs: Number.POSITIVE_INFINITY } }).ssh.nextRetryInMs, null);
   assert.equal(s.ssh.config.port, 22, '空字符串回退默认端口');
   assert.equal(s.ssh.config.remoteBindPort, 7788);
   assert.equal(s.ssh.config.accessPort, 8080, '数字字符串可解析');
