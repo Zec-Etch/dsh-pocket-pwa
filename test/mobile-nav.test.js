@@ -161,6 +161,32 @@ test('打包产物里带上抽屉规则的关键字', () => {
   }
 });
 
+test('打包产物：三通道 SSH / 通知与 PWA / 通行密钥的端点与文案都在 client.js 里', () => {
+  const bundle = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  // RPC 端点名（client/api.js 冻结契约）：漏打包 = 设置页点了没反应
+  for (const endpoint of [
+    'ssh.setConfig', 'ssh.status', 'passkey.setEnabled', 'passkey.list', 'passkey.revoke', 'passkey.rename',
+    'notify.setConfig', 'notify.status', 'notify.removeSubscription', 'notify.clearSubscriptions', 'notify.test',
+  ]) {
+    assert.ok(bundle.includes(`"${endpoint}"`), `打包产物缺少端点 "${endpoint}" —— 先跑 npm run build:client`);
+  }
+  // 宿主注入的浏览器入口（订阅/取消 + beforeinstallprompt）
+  assert.ok(bundle.includes('dshPocketPush'), '打包产物缺少 window.dshPocketPush 用法');
+  // 新增文案 key：SSH 状态表 / Webhook 预设表是「字符串字面量」引用，最容易被漏掉
+  for (const key of [
+    'sshStateIdle', 'sshStateStarting', 'sshStateConnected', 'sshStateReconnecting', 'sshStateFailed',
+    'sshStateStopped', 'sshTitle', 'sshNeedCfg', 'sshTestUnavailable',
+    'notifyTitle', 'notifySubsCount', 'notifySubscribeFailed', 'notifyMinIntervalPlaceholder',
+    'notifyPresetGeneric', 'notifyPresetBark', 'notifyLastResult', 'notifyClear', 'notifyClearFailed',
+    'pwaRow', 'pwaInstall', 'pwaNeedHttps', 'pwaNotReady',
+    'passkeyTitle', 'passkeyInsecure', 'passkeyRevokeConfirm', 'passkeyLoadFailed', 'passkeyNever',
+    'hostUnsupported', 'copyFailed',
+  ]) {
+    assert.ok(bundle.includes(`"${key}"`), `打包产物缺少文案 key "${key}" —— 先跑 npm run build:client`);
+  }
+});
+
+
 test('手机端右边栏默认显示，设置关闭后隐藏稳定 header corner 入口', () => {
   const css = readFileSync(new URL('../client/mobile/mobile.css.ts', import.meta.url), 'utf8');
   const apply = readFileSync(new URL('../client/mobile/mobile-apply.tsx', import.meta.url), 'utf8');

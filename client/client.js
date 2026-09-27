@@ -60,7 +60,22 @@ var POCKET_ENDPOINTS = Object.freeze({
   pocketReset: "pocket.reset",
   // 移动端「复制文件内容」（issue #17）：手机经此 RPC 让主机读取文件正文，
   // 再写入剪贴板——因为手机无法直接打开电脑上的文件。
-  fileRead: "pocket.fileRead"
+  fileRead: "pocket.fileRead",
+  // 第三通道「自有服务器 + SSH 反向端口映射」：配置、状态/测试连接。
+  // 三个公网入口（Quick / Named / SSH）互斥，由宿主的 tunnelMode 决定。
+  sshSetConfig: "ssh.setConfig",
+  sshStatus: "ssh.status",
+  // 通行密钥（WebAuthn）设备管理（仅本机可调）。
+  passkeySetEnabled: "passkey.setEnabled",
+  passkeyList: "passkey.list",
+  passkeyRevoke: "passkey.revoke",
+  passkeyRename: "passkey.rename",
+  // 通知：Web Push 订阅 + Webhook 配置与测试。
+  notifySetConfig: "notify.setConfig",
+  notifyStatus: "notify.status",
+  notifyRemoveSubscription: "notify.removeSubscription",
+  notifyClearSubscriptions: "notify.clearSubscriptions",
+  notifyTest: "notify.test"
 });
 function compareVersions(a, b) {
   const pa = String(a).replace(/^[vV]/, "").split(".");
@@ -91,6 +106,63 @@ function compareVersions(a, b) {
   }
   return 0;
 }
+function intOr(value, fallback) {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+function buildAccessUrl(cfg) {
+  const host = String(cfg?.accessHost || cfg?.host || "").trim();
+  if (!host) return null;
+  const proto = cfg?.accessProtocol === "http" ? "http" : "https";
+  const port = intOr(cfg?.accessPort, 0);
+  const defaultPort = proto === "http" ? 80 : 443;
+  const needPort = port !== 0 && port !== defaultPort && !/:\d+$/.test(host);
+  return `${proto}://${host}${needPort ? `:${port}` : ""}`;
+}
+var NOTIFY_PRESETS = ["generic", "wecom", "dingtalk", "feishu", "ntfy", "bark"];
+function redactSsh(ssh) {
+  const c = ssh?.config ?? {};
+  const config = {
+    host: c.host ?? "",
+    port: intOr(c.port, 22),
+    user: c.user ?? "",
+    keyPathSet: c.keyPathSet === true,
+    remoteBindPort: intOr(c.remoteBindPort, 7788),
+    accessProtocol: c.accessProtocol === "http" ? "http" : "https",
+    accessHost: c.accessHost ?? "",
+    accessPort: intOr(c.accessPort, 0),
+    autoRestore: c.autoRestore !== false
+  };
+  const url = ssh?.url ?? buildAccessUrl({ ...config, host: config.accessHost || config.host });
+  return {
+    running: ssh?.running === true,
+    state: typeof ssh?.state === "string" ? ssh.state : "idle",
+    url,
+    qr: ssh?.qr ?? null,
+    lastError: ssh?.lastError ?? null,
+    config
+  };
+}
+function redactNotify(n) {
+  return {
+    pushEnabled: n?.pushEnabled === true,
+    onTaskDone: n?.onTaskDone !== false,
+    webhookEnabled: n?.webhookEnabled === true,
+    webhookPreset: NOTIFY_PRESETS.includes(n?.webhookPreset) ? n.webhookPreset : "generic",
+    webhookUrl: n?.webhookUrl ?? "",
+    webhookConfigured: n?.webhookConfigured === true,
+    subscriptionCount: intOr(n?.subscriptionCount, 0),
+    // 冻结合同之外的可选字段：宿主返回时透传（设置页回显最小间隔），缺失为 null
+    minIntervalSec: n?.minIntervalSec == null ? null : intOr(n.minIntervalSec, null)
+  };
+}
+function redactPasskey(p) {
+  return {
+    enabled: p?.enabled === true,
+    rpId: p?.rpId ?? "",
+    deviceCount: intOr(p?.deviceCount, 0)
+  };
+}
 function redactStatus(s) {
   return {
     proxyRunning: s?.proxyRunning === true,
@@ -104,7 +176,11 @@ function redactStatus(s) {
     tunnelQr: s?.tunnelQr ?? null,
     tunnelState: s?.tunnelState ?? { phase: "idle" },
     tunnelConfig: s?.tunnelConfig ?? { mode: "quick", hostname: "", tokenSet: false },
-    dshPort: s?.dshPort ?? null
+    dshPort: s?.dshPort ?? null,
+    // 以下三块由后续 host 提供；旧 host 不返回时用默认值兜底（不返回 undefined 给 UI）
+    ssh: redactSsh(s?.ssh),
+    notify: redactNotify(s?.notify),
+    passkey: redactPasskey(s?.passkey)
   };
 }
 
@@ -1977,6 +2053,123 @@ var zh2 = {
   "slowHint": " \u2014 \u6709\u70B9\u4E45\uFF1F\u68C0\u67E5\u662F\u5426\u5F00\u7740\u4EE3\u7406/VPN\uFF08Clash TUN \u7B49\uFF09",
   "error": "\u274C \u5F00\u542F\u5931\u8D25\uFF1A{detail}\uFF08\u53EF\u91CD\u8BD5\uFF1B\u82E5\u662F\u4EE3\u7406/VPN \u95EE\u9898\u89C1 README \u6392\u969C\uFF09",
   "unknownError": "\u672A\u77E5\u9519\u8BEF",
+  // ── 第三通道 SSH（task-6）：自有服务器 + 反向端口映射 ──
+  "modeSsh": "SSH",
+  "sshTitle": "\u{1F517} SSH \u53CD\u5411\u96A7\u9053\uFF08\u81EA\u6709\u670D\u52A1\u5668\uFF09",
+  "sshHint": "\u628A\u672C\u673A DSH \u7ECF\u4F60\u7684\u670D\u52A1\u5668\u8F6C\u53D1\u51FA\u6765\uFF1B\u670D\u52A1\u5668\u9700\u5141\u8BB8\u8FDC\u7AEF\u8F6C\u53D1\uFF08sshd AllowTcpForwarding yes\uFF09\u3002",
+  "sshHost": "SSH \u4E3B\u673A",
+  "sshPort": "SSH \u7AEF\u53E3",
+  "sshUser": "\u7528\u6237\u540D",
+  "sshKeyPath": "\u79C1\u94A5\u8DEF\u5F84\uFF08\u53EF\u7559\u7A7A\uFF09",
+  "sshKeyPathHint": "\u7559\u7A7A = \u7528\u9ED8\u8BA4 ssh \u914D\u7F6E\uFF08~/.ssh/config \u6216 agent\uFF09\uFF1B\u53EA\u4F20\u8DEF\u5F84\uFF0C\u4E0D\u8BFB\u53D6\u5BC6\u94A5\u5185\u5BB9",
+  "sshKeyPathSet": "\u5DF2\u8BBE\u7F6E\uFF08\u7559\u7A7A\u4FDD\u5B58 = \u6539\u56DE\u9ED8\u8BA4\uFF09",
+  "sshRemoteBindPort": "\u8FDC\u7AEF\u8F6C\u53D1\u7AEF\u53E3",
+  "sshRemoteBindPortHint": "\u670D\u52A1\u5668\u4E0A\u76D1\u542C\u7684\u7AEF\u53E3\uFF0C\u628A\u8BBF\u95EE\u57DF\u540D\u53CD\u4EE3\u5230\u5B83",
+  "sshAccessProtocol": "\u8BBF\u95EE\u534F\u8BAE",
+  "sshAccessHost": "\u8BBF\u95EE\u57DF\u540D\uFF08\u53EF\u7559\u7A7A\uFF09",
+  "sshAccessHostHint": "\u7559\u7A7A = \u7528 SSH \u4E3B\u673A\u540D",
+  "sshAccessPort": "\u8BBF\u95EE\u7AEF\u53E3\uFF080 = \u9ED8\u8BA4\uFF09",
+  "sshAutoRestore": "DSH \u91CD\u542F\u540E\u81EA\u52A8\u6062\u590D",
+  "sshAutoRestoreHint": "\u5730\u5740\u4E0D\u968F\u91CD\u542F\u53D8\u5316\uFF1B\u5173\u95ED\u540E\u6BCF\u6B21\u91CD\u542F\u90FD\u8981\u624B\u52A8\u5F00\u542F\u96A7\u9053",
+  "sshNeedCfg": "\u8BF7\u5148\u586B\u5199 SSH \u4E3B\u673A\u4E0E\u7528\u6237\u540D",
+  "sshStart": "\u542F\u52A8\u96A7\u9053",
+  "sshStop": "\u505C\u6B62\u96A7\u9053",
+  "sshStarting": "\u542F\u52A8\u4E2D\u2026",
+  "sshTest": "\u6D4B\u8BD5\u8FDE\u63A5",
+  "sshTesting": "\u6D4B\u8BD5\u4E2D\u2026",
+  "sshTestOk": "\u2705 \u8FDE\u63A5\u6B63\u5E38",
+  "sshTestFail": "\u274C \u8FDE\u63A5\u5931\u8D25\uFF1A{err}",
+  "sshTestUnavailable": "\u6D4B\u8BD5\u8FDE\u63A5\u4E0D\u53EF\u7528\uFF08\u9700\u8F83\u65B0\u7684 dsh-pocket\uFF09",
+  "sshSaved": "\u2705 SSH \u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF1B\u91CD\u65B0\u5F00\u542F\u96A7\u9053\u540E\u751F\u6548",
+  "sshStateIdle": "\u23F8 \u672A\u8FD0\u884C",
+  "sshStateStarting": "\u23F3 \u6B63\u5728\u8FDE\u63A5 SSH \u670D\u52A1\u5668\u2026",
+  "sshStateConnected": "\u2705 \u96A7\u9053\u5DF2\u8FDE\u63A5",
+  "sshStateReconnecting": "\u23F3 \u8FDE\u63A5\u65AD\u5F00\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u8FDE\u2026",
+  "sshStateFailed": "\u274C \u8FDE\u63A5\u5931\u8D25\uFF0C\u4E0D\u518D\u81EA\u52A8\u91CD\u8BD5",
+  "sshStateStopped": "\u23F8 \u5DF2\u505C\u6B62",
+  "sshLastError": "\u6700\u8FD1\u9519\u8BEF\uFF1A{err}",
+  "sshUrlHint": "\u96A7\u9053\u8FDE\u4E0A\u540E\u6B64\u5730\u5740\u53EF\u8BBF\u95EE",
+  "sshRunningHint": "SSH \u53CD\u5411\u96A7\u9053\u5DF2\u8FDE\u901A\uFF0C\u5730\u5740\u56FA\u5B9A",
+  // ── 通知与 PWA（task-6）──
+  "notifyTitle": "\u{1F514} \u901A\u77E5\u4E0E PWA",
+  "notifyPush": "Web Push \u63A8\u9001",
+  "notifyPushHint": "\u4EFB\u52A1\u5B8C\u6210\u65F6\u63A8\u9001\u5230\u5DF2\u8BA2\u9605\u7684\u8BBE\u5907\uFF1B\u9001\u8FBE\u4F9D\u8D56\u6D4F\u89C8\u5668\u5382\u5546\u7684\u63A8\u9001\u670D\u52A1\uFF0C\u53EF\u80FD\u5EF6\u8FDF\u6216\u88AB\u7701\u7535\u7B56\u7565\u62E6\u622A",
+  "notifySubsCount": "\u5DF2\u8BA2\u9605\u8BBE\u5907\uFF1A{n} \u53F0",
+  "notifySubscribe": "\u6CE8\u518C\u672C\u673A\u8BA2\u9605",
+  "notifyUnsubscribe": "\u53D6\u6D88\u672C\u673A\u8BA2\u9605",
+  "notifySubscribed": "\u2705 \u672C\u673A\u5DF2\u8BA2\u9605\uFF1B\u4EFB\u52A1\u5B8C\u6210\u540E\u4F1A\u6536\u5230\u63A8\u9001",
+  "notifyUnsubscribed": "\u2705 \u5DF2\u53D6\u6D88\u672C\u673A\u8BA2\u9605",
+  "notifySubscribeFailed": "\u274C \u8BA2\u9605\u5931\u8D25\uFF1A{err}",
+  "notifyUnsubscribeFailed": "\u274C \u53D6\u6D88\u5931\u8D25\uFF1A{err}",
+  "notifyPushUnsupported": "\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 Web Push\uFF1AiOS \u9700\u5148\u300C\u5B89\u88C5\u5230\u4E3B\u5C4F\u300D\u518D\u4ECE\u4E3B\u5C4F\u6253\u5F00\uFF1B\u684C\u9762\u7AEF\u7528 Chrome/Edge/Firefox",
+  "notifyTest": "\u53D1\u9001\u6D4B\u8BD5\u901A\u77E5",
+  "notifyTesting": "\u53D1\u9001\u4E2D\u2026",
+  "notifyTestSent": "\u2705 \u5DF2\u53D1\u51FA\u6D4B\u8BD5\u901A\u77E5\uFF08\u6CA1\u6536\u5230\u5C31\u770B\u4E0B\u65B9\u300C\u6700\u8FD1\u63A8\u9001\u300D\uFF09",
+  "notifyTestFailed": "\u274C \u53D1\u9001\u5931\u8D25\uFF1A{err}",
+  "notifyLastResult": "\u6700\u8FD1\u63A8\u9001\uFF1A{text}",
+  "notifyResultOk": "\u6210\u529F",
+  "notifyResultFail": "\u5931\u8D25\uFF1A{err}",
+  "notifyResultPush": "Web Push",
+  "notifyResultWebhook": "Webhook",
+  "notifyNoResult": "\u8FD8\u6CA1\u6709\u63A8\u9001\u8BB0\u5F55",
+  "notifyClear": "\u6E05\u7A7A\u5168\u90E8\u8BA2\u9605",
+  "notifyClearConfirm": "\u6E05\u7A7A\u540E\u6240\u6709\u8BBE\u5907\u90FD\u8981\u91CD\u65B0\u6CE8\u518C\u8BA2\u9605\uFF08\u5DF2\u5931\u6548\u7684\u8BA2\u9605\u4E5F\u4F1A\u4E00\u5E76\u5220\u9664\uFF09\u3002",
+  "notifyCleared": "\u2705 \u5DF2\u6E05\u7A7A\u5168\u90E8\u8BA2\u9605",
+  "notifyClearFailed": "\u274C \u6E05\u7A7A\u5931\u8D25\uFF1A{err}",
+  "notifyWebhook": "Webhook \u63A8\u9001",
+  "notifyWebhookHint": "\u4EFB\u52A1\u5B8C\u6210\u65F6 POST \u5230\u4F60\u81EA\u5DF1\u7684\u673A\u5668\u4EBA\u6216\u670D\u52A1\uFF1B\u5BC6\u94A5\u53EA\u5B58\u5728\u7535\u8111\u4E0A\uFF0C\u4E0D\u56DE\u663E",
+  "notifyPreset": "\u9884\u8BBE",
+  "notifyPresetGeneric": "\u901A\u7528 JSON",
+  "notifyPresetWecom": "\u4F01\u4E1A\u5FAE\u4FE1\u673A\u5668\u4EBA",
+  "notifyPresetDingtalk": "\u9489\u9489\u673A\u5668\u4EBA",
+  "notifyPresetFeishu": "\u98DE\u4E66\u673A\u5668\u4EBA",
+  "notifyPresetNtfy": "ntfy",
+  "notifyPresetBark": "Bark",
+  "notifyUrl": "Webhook URL",
+  "notifySecret": "\u5BC6\u94A5\uFF08\u53EF\u9009\uFF09",
+  "notifySecretHint": "\u53EA\u5199\u4E0D\u56DE\u663E\uFF1B\u7559\u7A7A\u4FDD\u5B58 = \u4FDD\u6301\u5DF2\u8BBE\u7F6E\u7684\u5BC6\u94A5",
+  "notifySecretSet": "\u5DF2\u8BBE\u7F6E",
+  "notifyOnTaskDone": "\u4EFB\u52A1\u5B8C\u6210\u65F6\u63A8\u9001",
+  "notifyMinInterval": "\u6700\u5C0F\u63A8\u9001\u95F4\u9694\uFF08\u79D2\uFF09",
+  "notifyMinIntervalHint": "\u540C\u4E00\u4F1A\u8BDD\u5728\u8FD9\u4E2A\u95F4\u9694\u5185\u53EA\u63A8\u4E00\u6B21\uFF0C\u907F\u514D\u8FDE\u7EED\u5237\u5C4F",
+  "notifyMinIntervalPlaceholder": "10",
+  "notifySaved": "\u2705 \u901A\u77E5\u8BBE\u7F6E\u5DF2\u4FDD\u5B58",
+  "pwaRow": "\u5B89\u88C5\u5230\u4E3B\u5C4F\uFF08PWA\uFF09",
+  "pwaInstall": "\u5B89\u88C5\u5230\u4E3B\u5C4F",
+  "pwaInstallTriggered": "\u5DF2\u8BF7\u6C42\u5B89\u88C5\uFF0C\u6309\u6D4F\u89C8\u5668\u63D0\u793A\u786E\u8BA4",
+  "pwaInstallDismissed": "\u5DF2\u53D6\u6D88\u5B89\u88C5",
+  "pwaInstallUnavailable": "\u5F53\u524D\u4E0D\u53EF\u5B89\u88C5\uFF08\u9700 HTTPS \u4E0E\u652F\u6301 PWA \u7684\u6D4F\u89C8\u5668\uFF09",
+  "pwaStandalone": "\u5DF2\u5728\u4E3B\u5C4F\u5E94\u7528\u4E2D\u6253\u5F00",
+  "pwaNeedHttps": "\u975E HTTPS\uFF1A\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u5B89\u88C5\u5230\u4E3B\u5C4F\uFF08\u7528 https \u57DF\u540D\u6253\u5F00\u672C\u9875\uFF09",
+  "pwaUnsupported": "\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u5B89\u88C5\u5230\u4E3B\u5C4F\uFF08\u9700 Chrome/Edge/Safari\uFF09",
+  "pwaNotReady": "\u6682\u4E0D\u53EF\u5B89\u88C5\uFF1A\u6D4F\u89C8\u5668\u8FD8\u6CA1\u63D0\u4F9B\u5B89\u88C5\u6761\u4EF6\uFF08\u9700 HTTPS + \u5DF2\u6CE8\u518C Service Worker\uFF0C\u6709\u65F6\u8981\u7B49\u4E00\u4F1A\u513F\uFF09",
+  // ── 通行密钥设备（task-6）──
+  "passkeyTitle": "\u{1F510} \u901A\u884C\u5BC6\u94A5\u8BBE\u5907",
+  "passkeyHint": "\u5F00\u542F\u540E\u767B\u5F55\u9875\u53EF\u7528\u901A\u884C\u5BC6\u94A5\u8FDB\u5165\uFF0C\u5E76\u8BB0\u4F4F\u5DF2\u6CE8\u518C\u8BBE\u5907\uFF08\u4E0D\u7528\u6BCF\u6B21\u8F93\u5165\u516C\u7F51\u5BC6\u7801\uFF09",
+  "passkeyRpId": "\u5F53\u524D\u57DF\u540D\uFF08rpId\uFF09",
+  "passkeyDeviceCount": "\u5DF2\u6CE8\u518C\u8BBE\u5907\uFF1A{n} \u53F0",
+  "passkeyUnsupported": "\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u901A\u884C\u5BC6\u94A5\uFF08WebAuthn\uFF09\uFF0C\u4E0D\u80FD\u6CE8\u518C\uFF1B\u8BF7\u6539\u7528\u8F83\u65B0\u7684 Chrome/Edge/Safari",
+  "passkeyInsecure": "\u5F53\u524D\u4E0D\u662F HTTPS \u5B89\u5168\u73AF\u5883\uFF1A\u6D4F\u89C8\u5668\u53EA\u5141\u8BB8\u5728 HTTPS \u9875\u9762\u6CE8\u518C/\u4F7F\u7528\u901A\u884C\u5BC6\u94A5\uFF08\u5C40\u57DF\u7F51 http \u4E0B\u4E0D\u53EF\u7528\uFF09",
+  "passkeySecureHint": "\u6CE8\u518C\u65F6\u624B\u673A\u4F1A\u8981\u6C42\u6307\u7EB9/\u9762\u5BB9\u9A8C\u8BC1\uFF1B\u8BBE\u5907\u53EA\u80FD\u5728\u672C\u673A\u64A4\u9500",
+  "passkeyDevices": "\u8BBE\u5907\u5217\u8868",
+  "passkeyNoDevices": "\u8FD8\u6CA1\u6709\u6CE8\u518C\u8BBE\u5907",
+  "passkeyColCreated": "\u6CE8\u518C\u65F6\u95F4",
+  "passkeyColLastLogin": "\u6700\u540E\u767B\u5F55",
+  "passkeyRename": "\u91CD\u547D\u540D",
+  "passkeyRevoke": "\u64A4\u9500",
+  "passkeyRevokeConfirm": "\u64A4\u9500\u540E\u8BE5\u8BBE\u5907\u7ACB\u5373\u5931\u6548\uFF0C\u9700\u91CD\u65B0\u6CE8\u518C\u901A\u884C\u5BC6\u94A5\u3002",
+  "passkeyRevokeDone": "\u2705 \u8BBE\u5907\u5DF2\u64A4\u9500\uFF0C\u8BE5\u8BBE\u5907\u9700\u91CD\u65B0\u6CE8\u518C",
+  "passkeyRenamed": "\u2705 \u5DF2\u91CD\u547D\u540D",
+  "passkeyLoadFailed": "\u274C \u8BBE\u5907\u5217\u8868\u8BFB\u53D6\u5931\u8D25\uFF1A{err}",
+  "passkeyNever": "\u4ECE\u672A",
+  "passkeyUnnamed": "\u672A\u547D\u540D\u8BBE\u5907",
+  "passkeyEnabledDone": "\u2705 \u901A\u884C\u5BC6\u94A5\u5DF2\u542F\u7528",
+  "passkeyDisabledDone": "\u2705 \u901A\u884C\u5BC6\u94A5\u5DF2\u5173\u95ED\uFF08\u5DF2\u6CE8\u518C\u8BBE\u5907\u4ECD\u4FDD\u7559\uFF0C\u53EF\u968F\u65F6\u91CD\u65B0\u5F00\u542F\uFF09",
+  // ── 通用 ──
+  "copy": "\u590D\u5236",
+  "copied": "\u2705 \u5DF2\u590D\u5236",
+  "copyFailed": "\u274C \u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u5730\u5740",
+  "hostUnsupported": "\u5F53\u524D dsh-pocket \u7248\u672C\u672A\u8FD4\u56DE\u8FD9\u9879\u72B6\u6001\uFF0C\u5347\u7EA7\u5E76\u91CD\u542F\u540E\u53EF\u7528",
   "feedback": "\u6709\u95EE\u9898\uFF1F\u6B22\u8FCE\u5230 GitHub Issues \u53CD\u9988 \u{1F64F}"
 };
 var en2 = {
@@ -2075,6 +2268,123 @@ var en2 = {
   "slowHint": " \u2014 taking long? Check for a proxy/VPN (e.g., Clash TUN)",
   "error": "\u274C Failed to enable: {detail} (you can retry; for proxy/VPN issues see the README)",
   "unknownError": "unknown error",
+  // ── Third channel: SSH (task-6) ──
+  "modeSsh": "SSH",
+  "sshTitle": "\u{1F517} SSH reverse tunnel (your own server)",
+  "sshHint": "Forwards this computer\u2019s DSH through your own server; the server must allow remote forwarding (sshd AllowTcpForwarding yes).",
+  "sshHost": "SSH host",
+  "sshPort": "SSH port",
+  "sshUser": "Username",
+  "sshKeyPath": "Private key path (optional)",
+  "sshKeyPathHint": "Blank = use the default ssh config (~/.ssh/config or the agent); only the path is passed, key contents are never read",
+  "sshKeyPathSet": "set (blank on save = back to default)",
+  "sshRemoteBindPort": "Remote forward port",
+  "sshRemoteBindPortHint": "Port listened on the server; point the public hostname\u2019s reverse proxy at it",
+  "sshAccessProtocol": "Access protocol",
+  "sshAccessHost": "Public hostname (optional)",
+  "sshAccessHostHint": "Blank = use the SSH hostname",
+  "sshAccessPort": "Public port (0 = default)",
+  "sshAutoRestore": "Auto-restore after a DSH restart",
+  "sshAutoRestoreHint": "The address stays the same across restarts; when off you must start the tunnel manually each time",
+  "sshNeedCfg": "Fill in the SSH host and username first",
+  "sshStart": "Start tunnel",
+  "sshStop": "Stop tunnel",
+  "sshStarting": "Starting\u2026",
+  "sshTest": "Test connection",
+  "sshTesting": "Testing\u2026",
+  "sshTestOk": "\u2705 Connection OK",
+  "sshTestFail": "\u274C Connection failed: {err}",
+  "sshTestUnavailable": "Connection test unavailable (needs a newer dsh-pocket)",
+  "sshSaved": "\u2705 SSH config saved; restart the tunnel to apply",
+  "sshStateIdle": "\u23F8 Not running",
+  "sshStateStarting": "\u23F3 Connecting to the SSH server\u2026",
+  "sshStateConnected": "\u2705 Tunnel connected",
+  "sshStateReconnecting": "\u23F3 Disconnected \u2014 reconnecting automatically\u2026",
+  "sshStateFailed": "\u274C Failed \u2014 no further automatic retry",
+  "sshStateStopped": "\u23F8 Stopped",
+  "sshLastError": "Last error: {err}",
+  "sshUrlHint": "Reachable once the tunnel is up",
+  "sshRunningHint": "SSH reverse tunnel is up; the address is fixed",
+  // ── Notifications & PWA (task-6) ──
+  "notifyTitle": "\u{1F514} Notifications & PWA",
+  "notifyPush": "Web Push",
+  "notifyPushHint": "Pushes to subscribed devices when a task finishes; delivery depends on the browser vendor\u2019s push service and may be delayed or blocked by battery savers",
+  "notifySubsCount": "Subscribed devices: {n}",
+  "notifySubscribe": "Subscribe this device",
+  "notifyUnsubscribe": "Unsubscribe this device",
+  "notifySubscribed": "\u2705 This device is subscribed; you will be notified when a task finishes",
+  "notifyUnsubscribed": "\u2705 This device is unsubscribed",
+  "notifySubscribeFailed": "\u274C Subscribe failed: {err}",
+  "notifyUnsubscribeFailed": "\u274C Unsubscribe failed: {err}",
+  "notifyPushUnsupported": "This browser has no Web Push: on iOS install to the home screen and open it from there; on desktop use Chrome/Edge/Firefox",
+  "notifyTest": "Send a test notification",
+  "notifyTesting": "Sending\u2026",
+  "notifyTestSent": "\u2705 Test notification sent (if it did not arrive, see \u201CLast push\u201D below)",
+  "notifyTestFailed": "\u274C Send failed: {err}",
+  "notifyLastResult": "Last push: {text}",
+  "notifyResultOk": "ok",
+  "notifyResultFail": "failed: {err}",
+  "notifyResultPush": "Web Push",
+  "notifyResultWebhook": "Webhook",
+  "notifyNoResult": "No push yet",
+  "notifyClear": "Clear all subscriptions",
+  "notifyClearConfirm": "After clearing, every device must subscribe again (stale subscriptions are removed too).",
+  "notifyCleared": "\u2705 All subscriptions cleared",
+  "notifyClearFailed": "\u274C Clear failed: {err}",
+  "notifyWebhook": "Webhook",
+  "notifyWebhookHint": "POSTs to your own bot or service when a task finishes; the secret stays on this computer and is never echoed back",
+  "notifyPreset": "Preset",
+  "notifyPresetGeneric": "Generic JSON",
+  "notifyPresetWecom": "WeCom bot",
+  "notifyPresetDingtalk": "DingTalk bot",
+  "notifyPresetFeishu": "Feishu bot",
+  "notifyPresetNtfy": "ntfy",
+  "notifyPresetBark": "Bark",
+  "notifyUrl": "Webhook URL",
+  "notifySecret": "Secret (optional)",
+  "notifySecretHint": "Write-only; blank on save keeps the current secret",
+  "notifySecretSet": "set",
+  "notifyOnTaskDone": "Push when a task finishes",
+  "notifyMinInterval": "Minimum push interval (s)",
+  "notifyMinIntervalHint": "At most one push per session within this interval",
+  "notifyMinIntervalPlaceholder": "10",
+  "notifySaved": "\u2705 Notification settings saved",
+  "pwaRow": "Install to home screen (PWA)",
+  "pwaInstall": "Install to home screen",
+  "pwaInstallTriggered": "Install requested \u2014 confirm in the browser prompt",
+  "pwaInstallDismissed": "Install cancelled",
+  "pwaInstallUnavailable": "Not installable now (needs HTTPS and a PWA-capable browser)",
+  "pwaStandalone": "Already running from the home screen",
+  "pwaNeedHttps": "Not HTTPS: browsers will not install to the home screen (open this page over https)",
+  "pwaUnsupported": "This browser cannot install to the home screen (use Chrome/Edge/Safari)",
+  "pwaNotReady": "Not installable yet: the browser has not offered the install prompt (needs HTTPS and a registered service worker; it can take a moment)",
+  // ── Passkey devices (task-6) ──
+  "passkeyTitle": "\u{1F510} Passkey devices",
+  "passkeyHint": "When on, the login page accepts passkeys and remembered devices (no PIN needed on every visit)",
+  "passkeyRpId": "Current domain (rpId)",
+  "passkeyDeviceCount": "Registered devices: {n}",
+  "passkeyUnsupported": "This browser has no WebAuthn support, so passkeys cannot be registered; use a recent Chrome/Edge/Safari",
+  "passkeyInsecure": "This is not a secure context: browsers only allow passkey registration on HTTPS pages (unusable over plain-http LAN)",
+  "passkeySecureHint": "Registration asks for fingerprint/face on the phone; devices can only be revoked on this computer",
+  "passkeyDevices": "Devices",
+  "passkeyNoDevices": "No registered devices yet",
+  "passkeyColCreated": "Registered",
+  "passkeyColLastLogin": "Last sign-in",
+  "passkeyRename": "Rename",
+  "passkeyRevoke": "Revoke",
+  "passkeyRevokeConfirm": "Revoking stops that device immediately; it must register a new passkey.",
+  "passkeyRevokeDone": "\u2705 Device revoked \u2014 it must register again",
+  "passkeyRenamed": "\u2705 Renamed",
+  "passkeyLoadFailed": "\u274C Could not load devices: {err}",
+  "passkeyNever": "never",
+  "passkeyUnnamed": "Unnamed device",
+  "passkeyEnabledDone": "\u2705 Passkeys enabled",
+  "passkeyDisabledDone": "\u2705 Passkeys disabled (registered devices are kept; you can re-enable anytime)",
+  // ── Shared ──
+  "copy": "Copy",
+  "copied": "\u2705 Copied",
+  "copyFailed": "\u274C Copy failed \u2014 select the address manually",
+  "hostUnsupported": "This dsh-pocket version does not report this status \u2014 update and restart to enable it",
   "feedback": "\u{1F64F} Questions? Open an issue on GitHub"
 };
 
@@ -2100,8 +2410,79 @@ var styles = {
   // 次级按钮：官方 outline/ghost 胶囊形
   btn: { font: "inherit", cursor: "pointer", border: "1px solid var(--dsw-alias-button-ghost-active-border, var(--dsw-alias-border-l2,#d1d5db))", background: "var(--dsw-alias-bg-layer-1,#fff)", color: "var(--dsw-alias-label-primary,inherit)", height: 36, padding: "0 16px", borderRadius: 999, fontSize: 13, display: "inline-flex", alignItems: "center", justifyContent: "center" },
   qr: { width: 220, height: 220, borderRadius: 10, border: "1px solid var(--dsw-alias-border-l2,#e5e7eb)", margin: "8px 0" },
-  warn: { color: "var(--dsw-alias-state-warn-primary,#b45309)", fontSize: 12, lineHeight: 1.5 }
+  warn: { color: "var(--dsw-alias-state-warn-primary,#b45309)", fontSize: 12, lineHeight: 1.5 },
+  // 表单输入：窄屏单列，宽度收在卡片内不溢出（box-sizing 必须有，否则 padding 撑破 320px）
+  input: {
+    boxSizing: "border-box",
+    width: "100%",
+    maxWidth: 260,
+    padding: "6px 8px",
+    fontSize: 13,
+    font: "inherit",
+    border: "1px solid var(--dsw-alias-border-l2,#d1d5db)",
+    borderRadius: 6,
+    outline: "none",
+    background: "var(--dsw-alias-bg-layer-1,#fff)",
+    color: "var(--dsw-alias-label-primary,inherit)"
+  },
+  select: {
+    boxSizing: "border-box",
+    width: "100%",
+    maxWidth: 260,
+    height: 30,
+    padding: "0 8px",
+    fontSize: 13,
+    font: "inherit",
+    border: "1px solid var(--dsw-alias-border-l2,#d1d5db)",
+    borderRadius: 6,
+    background: "var(--dsw-alias-bg-layer-1,#fff)",
+    color: "var(--dsw-alias-label-primary,inherit)"
+  },
+  // 小按钮（行内操作：复制/测试/重命名…）：与现有 26px 高度一致
+  miniBtn: { font: "inherit", cursor: "pointer", border: "1px solid var(--dsw-alias-button-ghost-active-border, var(--dsw-alias-border-l2,#d1d5db))", background: "var(--dsw-alias-bg-layer-1,#fff)", color: "var(--dsw-alias-label-primary,inherit)", height: 26, padding: "0 10px", borderRadius: 999, fontSize: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" },
+  smallBtn: { font: "inherit", cursor: "pointer", border: "1px solid var(--dsw-alias-button-ghost-active-border, var(--dsw-alias-border-l2,#d1d5db))", background: "var(--dsw-alias-bg-layer-1,#fff)", color: "var(--dsw-alias-label-primary,inherit)", height: 28, padding: "0 12px", borderRadius: 999, fontSize: 12, display: "inline-flex", alignItems: "center", justifyContent: "center" },
+  btnRow: { display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", minWidth: 0 }
 };
+var SSH_STATE_TEXT = {
+  idle: "sshStateIdle",
+  starting: "sshStateStarting",
+  connected: "sshStateConnected",
+  reconnecting: "sshStateReconnecting",
+  failed: "sshStateFailed",
+  stopped: "sshStateStopped"
+};
+var NOTIFY_PRESETS2 = [
+  ["generic", "notifyPresetGeneric"],
+  ["wecom", "notifyPresetWecom"],
+  ["dingtalk", "notifyPresetDingtalk"],
+  ["feishu", "notifyPresetFeishu"],
+  ["ntfy", "notifyPresetNtfy"],
+  ["bark", "notifyPresetBark"]
+];
+function intField(value, fallback) {
+  const n = Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+function fmtTime(ts, fallback) {
+  const n = typeof ts === "number" ? ts : Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  try {
+    return new Date(n).toLocaleString();
+  } catch {
+    return fallback;
+  }
+}
+function detectWebAuthn() {
+  try {
+    if (typeof window === "undefined") return { supported: false, secure: false };
+    return {
+      supported: typeof window.PublicKeyCredential === "function",
+      secure: window.isSecureContext === true
+    };
+  } catch {
+    return { supported: false, secure: false };
+  }
+}
 function applyMobileRightbarSetting(enabled) {
   const on = enabled !== false;
   document.body?.setAttribute(MOBILE_RIGHTBAR_ATTRIBUTE, on ? "on" : "off");
@@ -2132,6 +2513,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       setStatus(s);
       applyMobileRightbarSetting(s.mobileRightbarEnabled);
       setTunnelState(s.tunnelState ?? null);
+      refreshBrowserCapabilities();
       if (s.desktop) setIsDesktop(true);
       if (s.restartNotice) {
         setRestartNotice(true);
@@ -2222,6 +2604,10 @@ function PocketSettingsTab({ rpcCall, t }) {
     const cfg = status?.tunnelConfig;
     if (cfg?.mode === "named" && (!cfg.hostname || !cfg.tokenSet)) {
       setError(t("namedNeedCfg"));
+      return;
+    }
+    if (cfg?.mode === "ssh" && (!status?.ssh?.config?.host || !status?.ssh?.config?.user)) {
+      setError(t("sshNeedCfg"));
       return;
     }
     setBusy(true);
@@ -2430,6 +2816,477 @@ function PocketSettingsTab({ rpcCall, t }) {
     extra ?? null
   );
   const [advOpen, setAdvOpen] = (0, import_react2.useState)(false);
+  const [sshCfg, setSshCfg] = (0, import_react2.useState)(null);
+  const [sshTestResult, setSshTestResult] = (0, import_react2.useState)(null);
+  const [sshTesting, setSshTesting] = (0, import_react2.useState)(false);
+  const publicMode = tunnelModeView?.mode === "ssh" ? "ssh" : tunnelModeView?.mode === "named" ? "named" : "quick";
+  const sshView = status?.ssh ?? null;
+  const sshRunning = sshView?.running === true;
+  const sshMode = publicMode === "ssh";
+  const sshState = typeof sshView?.state === "string" ? sshView.state : "idle";
+  const sshStateKey = SSH_STATE_TEXT[sshState] ?? SSH_STATE_TEXT.idle;
+  const sshEdit = sshCfg !== null;
+  const sshActive = sshEdit || sshMode || sshRunning;
+  const sshStarting = sshState === "starting" || sshState === "reconnecting";
+  const sshConfigView = sshView?.config ?? {};
+  const sshAddress = sshView?.url ?? buildAccessUrl(sshConfigView);
+  const sshForm = sshCfg ?? {
+    host: sshConfigView.host ?? "",
+    port: String(sshConfigView.port ?? 22),
+    user: sshConfigView.user ?? "",
+    keyPath: "",
+    remoteBindPort: String(sshConfigView.remoteBindPort ?? 7788),
+    accessProtocol: sshConfigView.accessProtocol === "http" ? "http" : "https",
+    accessHost: sshConfigView.accessHost ?? "",
+    accessPort: String(sshConfigView.accessPort ?? 0),
+    autoRestore: sshConfigView.autoRestore !== false,
+    err: null
+  };
+  const publicRunning = !!tunnelUrl || sshRunning;
+  const patchSshForm = (patch) => setSshCfg((c) => ({ ...c ?? sshForm, ...patch, err: null }));
+  const openSshEditor = () => {
+    setTunnelCfg(null);
+    setSshTestResult(null);
+    setSshCfg({
+      host: sshConfigView.host ?? "",
+      port: String(sshConfigView.port ?? 22),
+      user: sshConfigView.user ?? "",
+      keyPath: "",
+      remoteBindPort: String(sshConfigView.remoteBindPort ?? 7788),
+      accessProtocol: sshConfigView.accessProtocol === "http" ? "http" : "https",
+      accessHost: sshConfigView.accessHost ?? "",
+      accessPort: String(sshConfigView.accessPort ?? 0),
+      autoRestore: sshConfigView.autoRestore !== false,
+      err: null
+    });
+  };
+  const mergeStatus = (next) => {
+    if (!next || typeof next !== "object" || Array.isArray(next)) return;
+    setStatus((s) => ({ ...s ?? {}, ...next }));
+  };
+  const saveSshConfig = async () => {
+    const f = sshForm;
+    const host = String(f.host ?? "").trim();
+    const user = String(f.user ?? "").trim();
+    if (!host || !user) {
+      setSshCfg((c) => ({ ...c ?? f, err: t("sshNeedCfg") }));
+      return;
+    }
+    try {
+      const next = await call(POCKET_ENDPOINTS.sshSetConfig, {
+        mode: "ssh",
+        // 保存 SSH 配置即把公网入口切到 ssh（与 quick/named 互斥）
+        host,
+        user,
+        port: intField(f.port, 22),
+        keyPath: String(f.keyPath ?? "").trim(),
+        // 空 = 用默认 ssh 配置
+        remoteBindPort: intField(f.remoteBindPort, 7788),
+        accessProtocol: f.accessProtocol === "http" ? "http" : "https",
+        accessHost: String(f.accessHost ?? "").trim(),
+        accessPort: intField(f.accessPort, 0),
+        autoRestore: f.autoRestore !== false
+      });
+      mergeStatus(next);
+      setSshCfg(null);
+      showToast(t("sshSaved"));
+    } catch (err) {
+      setSshCfg((c) => ({ ...c ?? f, err: err.message }));
+    }
+  };
+  const testSshConnection = async () => {
+    setSshTesting(true);
+    setSshTestResult(null);
+    try {
+      const r = await call(POCKET_ENDPOINTS.sshStatus, { test: true });
+      if (r && typeof r === "object") {
+        if (r.ssh && typeof r.ssh === "object") mergeStatus({ ssh: r.ssh });
+        else if ("running" in r || "state" in r) mergeStatus({ ssh: { ...status?.ssh ?? {}, ...r } });
+      }
+      const probe = r?.test && typeof r.test === "object" ? r.test : null;
+      if (probe) setSshTestResult({ ok: probe.ok === true, message: probe.message ?? probe.error ?? null });
+      else if (r?.running === true || r?.state === "connected") setSshTestResult({ ok: true, message: null });
+      else if (typeof r?.state === "string") setSshTestResult({ ok: false, state: r.state, message: r.lastError ?? null });
+      else setSshTestResult({ ok: false, unavailable: true, message: null });
+    } catch (err) {
+      setSshTestResult({ ok: false, message: err.message });
+    } finally {
+      setSshTesting(false);
+    }
+  };
+  const selectQuick = () => {
+    setTunnelCfg(null);
+    setSshCfg(null);
+    if (publicMode !== "quick") switchToQuick();
+  };
+  const selectNamed = () => {
+    setSshCfg(null);
+    setTunnelCfg(tunnelCfg ? null : { hostname: tunnelModeView.hostname ?? "", token: "", err: null });
+  };
+  const selectSsh = () => {
+    setTunnelCfg(null);
+    if (!sshCfg) openSshEditor();
+  };
+  const sshField = (label, node, hint) => (0, import_react2.createElement)(
+    "div",
+    { style: { marginTop: 9, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.5 } },
+    (0, import_react2.createElement)("div", { style: { marginBottom: 3 } }, label),
+    node,
+    hint ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 2 } }, hint) : null
+  );
+  const sshInput = (value, onChange, extra) => (0, import_react2.createElement)("input", {
+    style: styles.input,
+    value: value ?? "",
+    autoComplete: "off",
+    onChange: (e) => onChange(e.target.value),
+    ...extra
+  });
+  const COLOR_OK = "var(--dsw-alias-state-success-primary,#15803d)";
+  const COLOR_ERR = "var(--dsw-alias-state-error-primary,#dc2626)";
+  const sshSection = !sshActive ? null : (0, import_react2.createElement)(
+    "div",
+    { style: { marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--dsw-alias-border-l2,#e5e7eb)" } },
+    (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("sshTitle")),
+    (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("sshHint")),
+    // 运行状态与阶段
+    (0, import_react2.createElement)(
+      "div",
+      { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word", color: sshState === "connected" ? COLOR_OK : sshState === "failed" ? COLOR_ERR : "var(--dsw-alias-label-secondary,#6b7280)" } },
+      t(sshStateKey)
+    ),
+    sshView?.lastError ? (0, import_react2.createElement)("div", { style: { ...styles.warn, marginTop: 4, wordBreak: "break-word" } }, fmt(t, "sshLastError", { err: errText(sshView.lastError) })) : null,
+    sshTestResult ? (0, import_react2.createElement)(
+      "div",
+      { style: { marginTop: 4, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word", color: sshTestResult.ok ? COLOR_OK : COLOR_ERR } },
+      sshTestResult.ok ? t("sshTestOk") : sshTestResult.unavailable ? t("sshTestUnavailable") : sshTestResult.state ? t(SSH_STATE_TEXT[sshTestResult.state] ?? SSH_STATE_TEXT.idle) : fmt(t, "sshTestFail", { err: errText(sshTestResult.message) || t("unknownError") })
+    ) : null,
+    // 地址与二维码：运行且有二维码时优先展示，否则只显示地址 + 复制
+    sshRunning && sshAddress && sshView?.qr ? qrArea(sshView.qr, sshAddress, t("sshRunningHint")) : sshAddress ? (0, import_react2.createElement)(
+      "div",
+      { style: { marginTop: 8 } },
+      (0, import_react2.createElement)("div", { style: styles.code }, sshAddress),
+      (0, import_react2.createElement)("div", null, (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => copyText2(sshAddress) }, t("copy"))),
+      (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("sshUrlHint"))
+    ) : null,
+    // 配置表单
+    (0, import_react2.createElement)(
+      "div",
+      null,
+      !sshView ? (0, import_react2.createElement)("div", { style: { ...styles.warn, marginTop: 8 } }, t("hostUnsupported")) : null,
+      sshView || sshEdit ? (0, import_react2.createElement)(
+        "div",
+        null,
+        sshField(t("sshHost"), sshInput(sshForm.host, (v) => patchSshForm({ host: v.trim() }), { placeholder: "vps.example.com" })),
+        sshField(t("sshPort"), sshInput(sshForm.port, (v) => patchSshForm({ port: v }), { inputMode: "numeric" })),
+        sshField(t("sshUser"), sshInput(sshForm.user, (v) => patchSshForm({ user: v.trim() }), { placeholder: "dsh" })),
+        sshField(
+          t("sshKeyPath"),
+          sshInput(sshForm.keyPath, (v) => patchSshForm({ keyPath: v.trim() }), { placeholder: "~/.ssh/id_ed25519" }),
+          sshConfigView.keyPathSet ? t("sshKeyPathSet") : t("sshKeyPathHint")
+        ),
+        sshField(
+          t("sshRemoteBindPort"),
+          sshInput(sshForm.remoteBindPort, (v) => patchSshForm({ remoteBindPort: v }), { inputMode: "numeric" }),
+          t("sshRemoteBindPortHint")
+        ),
+        sshField(
+          t("sshAccessProtocol"),
+          (0, import_react2.createElement)(
+            "select",
+            { style: styles.select, value: sshForm.accessProtocol, onChange: (e) => patchSshForm({ accessProtocol: e.target.value }) },
+            (0, import_react2.createElement)("option", { value: "https" }, "https"),
+            (0, import_react2.createElement)("option", { value: "http" }, "http")
+          )
+        ),
+        sshField(
+          t("sshAccessHost"),
+          sshInput(sshForm.accessHost, (v) => patchSshForm({ accessHost: v.trim() }), { placeholder: sshForm.host || "dsh.example.com" }),
+          t("sshAccessHostHint")
+        ),
+        sshField(t("sshAccessPort"), sshInput(sshForm.accessPort, (v) => patchSshForm({ accessPort: v }), { inputMode: "numeric" })),
+        sshField(
+          t("sshAutoRestore"),
+          Switch(sshForm.autoRestore !== false, () => patchSshForm({ autoRestore: sshForm.autoRestore === false })),
+          t("sshAutoRestoreHint")
+        )
+      ) : null,
+      sshForm.err ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR, marginTop: 6, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word" } }, errText(sshForm.err)) : null,
+      // 操作：保存 / 启动(停止)隧道 / 测试连接（窄屏自动换行）
+      (0, import_react2.createElement)(
+        "div",
+        { style: { marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" } },
+        (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: saveSshConfig }, t("save")),
+        sshRunning ? (0, import_react2.createElement)("button", { style: { ...styles.smallBtn, color: COLOR_ERR }, onClick: stopTunnel }, t("sshStop")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || sshStarting }, busy || sshStarting ? t("sshStarting") : t("sshStart")),
+        (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: testSshConnection, disabled: sshTesting }, sshTesting ? t("sshTesting") : t("sshTest")),
+        sshEdit ? (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: () => setSshCfg(null) }, t("cancel")) : null
+      )
+    )
+  );
+  const [notifyEdit, setNotifyEdit] = (0, import_react2.useState)(null);
+  const [notifyStatusData, setNotifyStatusData] = (0, import_react2.useState)(null);
+  const [notifyBusy, setNotifyBusy] = (0, import_react2.useState)(false);
+  const [pushApiReady, setPushApiReady] = (0, import_react2.useState)(false);
+  const [canInstall, setCanInstall] = (0, import_react2.useState)(false);
+  const [clearSubsAsk, setClearSubsAsk] = (0, import_react2.useState)(false);
+  const installEvRef = (0, import_react2.useRef)(null);
+  const notifyView = status?.notify ?? null;
+  const notifyForm = notifyEdit ?? {
+    preset: notifyView?.webhookPreset ?? "generic",
+    url: notifyView?.webhookUrl ?? "",
+    secret: "",
+    minInterval: notifyView?.minIntervalSec == null ? "" : String(notifyView.minIntervalSec)
+  };
+  const patchNotifyForm = (patch) => setNotifyEdit((f) => ({ ...f ?? notifyForm, ...patch }));
+  const pushApi = () => {
+    try {
+      return typeof window === "undefined" ? null : window.dshPocketPush ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const refreshBrowserCapabilities = () => {
+    try {
+      const api = pushApi();
+      setPushApiReady(typeof api?.subscribe === "function");
+      const ev = typeof api?.installPrompt === "function" ? api.installPrompt() : null;
+      if (ev && !installEvRef.current) installEvRef.current = ev;
+      setCanInstall(!!installEvRef.current);
+    } catch {
+    }
+  };
+  const loadNotifyStatus = async () => {
+    if (!status?.notify) return;
+    try {
+      const r = await call(POCKET_ENDPOINTS.notifyStatus, {});
+      if (!r || typeof r !== "object") return;
+      setNotifyStatusData(r);
+      const patch = r.notify && typeof r.notify === "object" ? r.notify : r;
+      setStatus((s) => ({ ...s ?? {}, notify: { ...s?.notify ?? {}, ...patch } }));
+    } catch {
+    }
+  };
+  const setNotifyFlag = async (field, value) => {
+    try {
+      mergeStatus(await call(POCKET_ENDPOINTS.notifySetConfig, { [field]: value }));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  const saveNotifyConfig = async () => {
+    if (!notifyView) {
+      showToast(t("hostUnsupported"));
+      return;
+    }
+    setNotifyBusy(true);
+    try {
+      const payload = {
+        webhookPreset: notifyForm.preset,
+        webhookUrl: String(notifyForm.url ?? "").trim()
+      };
+      const secret = String(notifyForm.secret ?? "").trim();
+      if (secret) payload.webhookSecret = secret;
+      const minRaw = String(notifyForm.minInterval ?? "").trim();
+      if (minRaw !== "") payload.minIntervalSec = intField(minRaw, 10);
+      mergeStatus(await call(POCKET_ENDPOINTS.notifySetConfig, payload));
+      setNotifyEdit(null);
+      showToast(t("notifySaved"));
+      loadNotifyStatus();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setNotifyBusy(false);
+    }
+  };
+  const sendTestNotification = async () => {
+    setNotifyBusy(true);
+    try {
+      const r = await call(POCKET_ENDPOINTS.notifyTest, {});
+      const results = Array.isArray(r?.results) ? r.results : Array.isArray(r?.lastResults) ? r.lastResults : [];
+      const failed = results.find((x) => x && x.ok === false);
+      showToast(failed ? fmt(t, "notifyTestFailed", { err: errText(failed.error) || `${resultChannel(failed)} HTTP ${failed.status ?? "\u2014"}` }) : t("notifyTestSent"));
+      loadNotifyStatus();
+    } catch (err) {
+      showToast(fmt(t, "notifyTestFailed", { err: errText(err?.message) || t("unknownError") }));
+    } finally {
+      setNotifyBusy(false);
+    }
+  };
+  const resultChannel = (r) => r?.channel === "webhook" ? t("notifyResultWebhook") : t("notifyResultPush");
+  const resultText = (r) => `${resultChannel(r)} \xB7 ${r?.ok === true ? t("notifyResultOk") : fmt(t, "notifyResultFail", { err: errText(r?.error) || `HTTP ${r?.status ?? "\u2014"}` })}`;
+  const notifyResults = Array.isArray(notifyStatusData?.lastResults) ? notifyStatusData.lastResults : Array.isArray(notifyStatusData?.results) ? notifyStatusData.results : [];
+  const notifyLastResult = notifyResults.length ? notifyResults[notifyResults.length - 1] : null;
+  const subscribePush = async () => {
+    const api = pushApi();
+    if (typeof api?.subscribe !== "function") {
+      showToast(t("notifyPushUnsupported"));
+      return;
+    }
+    setNotifyBusy(true);
+    try {
+      const r = await api.subscribe();
+      if (r && r.ok === false) throw new Error(r.error?.message ?? r.error ?? "subscribe failed");
+      showToast(t("notifySubscribed"));
+      loadNotifyStatus();
+    } catch (err) {
+      showToast(fmt(t, "notifySubscribeFailed", { err: errText(err?.message) || t("unknownError") }));
+    } finally {
+      setNotifyBusy(false);
+    }
+  };
+  const unsubscribePush = async () => {
+    const api = pushApi();
+    if (typeof api?.unsubscribe !== "function") {
+      showToast(t("notifyPushUnsupported"));
+      return;
+    }
+    setNotifyBusy(true);
+    try {
+      const r = await api.unsubscribe();
+      if (r && r.ok === false) throw new Error(r.error?.message ?? r.error ?? "unsubscribe failed");
+      showToast(t("notifyUnsubscribed"));
+      loadNotifyStatus();
+    } catch (err) {
+      showToast(fmt(t, "notifyUnsubscribeFailed", { err: errText(err?.message) || t("unknownError") }));
+    } finally {
+      setNotifyBusy(false);
+    }
+  };
+  const clearSubscriptions = async () => {
+    setClearSubsAsk(false);
+    setNotifyBusy(true);
+    try {
+      mergeStatus(await call(POCKET_ENDPOINTS.notifyClearSubscriptions, {}));
+      showToast(t("notifyCleared"));
+      loadNotifyStatus();
+    } catch (err) {
+      showToast(fmt(t, "notifyClearFailed", { err: errText(err?.message) || t("unknownError") }));
+    } finally {
+      setNotifyBusy(false);
+    }
+  };
+  const promptInstall = async () => {
+    try {
+      const api = pushApi();
+      const ev = installEvRef.current ?? (typeof api?.installPrompt === "function" ? api.installPrompt() : null);
+      if (!ev) {
+        showToast(t("pwaInstallUnavailable"));
+        return;
+      }
+      if (typeof ev.prompt === "function") {
+        await ev.prompt();
+        const choice = await Promise.resolve(ev.userChoice ?? null).catch(() => null);
+        showToast(choice?.outcome === "accepted" ? t("pwaInstallTriggered") : t("pwaInstallDismissed"));
+        installEvRef.current = null;
+        setCanInstall(false);
+        return;
+      }
+      showToast(t("pwaInstallTriggered"));
+    } catch (err) {
+      showToast(fmt(t, "notifySubscribeFailed", { err: errText(err?.message) || t("unknownError") }));
+    }
+  };
+  const pwaReason = () => {
+    try {
+      if (typeof window === "undefined") return t("pwaUnsupported");
+      if (window.isSecureContext !== true) return t("pwaNeedHttps");
+      if (window.matchMedia?.("(display-mode: standalone)")?.matches === true || window.navigator?.standalone === true) return t("pwaStandalone");
+      if (!("serviceWorker" in (window.navigator ?? {}))) return t("pwaUnsupported");
+      return t("pwaNotReady");
+    } catch {
+      return t("pwaNotReady");
+    }
+  };
+  const [devices, setDevices] = (0, import_react2.useState)(null);
+  const [devicesErr, setDevicesErr] = (0, import_react2.useState)(null);
+  const [renameId, setRenameId] = (0, import_react2.useState)(null);
+  const [renameVal, setRenameVal] = (0, import_react2.useState)("");
+  const [revokeId, setRevokeId] = (0, import_react2.useState)(null);
+  const [passkeyBusy, setPasskeyBusy] = (0, import_react2.useState)(false);
+  const passkeyView = status?.passkey ?? null;
+  const webAuthn = detectWebAuthn();
+  const loadDevices = async () => {
+    try {
+      const r = await call(POCKET_ENDPOINTS.passkeyList, {});
+      const list = Array.isArray(r) ? r : Array.isArray(r?.devices) ? r.devices : [];
+      setDevices(list);
+      setDevicesErr(null);
+    } catch (err) {
+      setDevices([]);
+      setDevicesErr(err.message);
+    }
+  };
+  const setPasskeyEnabled = async (on) => {
+    setPasskeyBusy(true);
+    try {
+      mergeStatus(await call(POCKET_ENDPOINTS.passkeySetEnabled, { on }));
+      showToast(on ? t("passkeyEnabledDone") : t("passkeyDisabledDone"));
+      loadDevices();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPasskeyBusy(false);
+    }
+  };
+  const doRenameDevice = async (id) => {
+    const name2 = String(renameVal ?? "").trim();
+    if (!name2) {
+      setRenameId(null);
+      return;
+    }
+    try {
+      await call(POCKET_ENDPOINTS.passkeyRename, { id, name: name2 });
+      setRenameId(null);
+      setRenameVal("");
+      showToast(t("passkeyRenamed"));
+      loadDevices();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  const doRevokeDevice = async (id) => {
+    try {
+      await call(POCKET_ENDPOINTS.passkeyRevoke, { id });
+      setRevokeId(null);
+      showToast(t("passkeyRevokeDone"));
+      loadDevices();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  const copyText2 = async (text) => {
+    const value = String(text ?? "").trim();
+    if (!value) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        showToast(t("copied"));
+        return;
+      }
+    } catch {
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = value;
+      ta.setAttribute("readonly", "readonly");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand?.("copy");
+      document.body.removeChild(ta);
+      showToast(ok ? t("copied") : t("copyFailed"));
+    } catch {
+      showToast(t("copyFailed"));
+    }
+  };
+  const initialLoadRef = (0, import_react2.useRef)(false);
+  (0, import_react2.useEffect)(() => {
+    if (!status || initialLoadRef.current) return;
+    initialLoadRef.current = true;
+    if (status.passkey) loadDevices();
+    if (status.notify) loadNotifyStatus();
+  }, [status]);
   return (0, import_react2.createElement)(
     "div",
     { style: styles.card },
@@ -2553,7 +3410,7 @@ function PocketSettingsTab({ rpcCall, t }) {
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
         (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("wanAccess")),
-        tunnelUrl ? (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: stopTunnel }, t("stopTunnel")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t("opening") : t("enable"))
+        publicRunning ? (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: stopTunnel }, t("stopTunnel")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t("opening") : t("enable"))
       ),
       tunnelStarting ? (0, import_react2.createElement)(
         "div",
@@ -2563,100 +3420,103 @@ function PocketSettingsTab({ rpcCall, t }) {
         "div",
         { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" } },
         fmt(t, "error", { detail: errText(tunnelStateDetail) || t("unknownError") })
-      ) : !tunnelUrl && !isDesktop ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 8 } }, t("wanOffHint")) : null,
+      ) : !publicRunning && !isDesktop ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 8 } }, t("wanOffHint")) : null,
+      // 公网入口三选一（Quick/Named/SSH 互斥）：不依赖隧道是否在运行，随时可切换/配置
+      row(
+        t("modeLabel"),
+        (0, import_react2.createElement)(
+          "span",
+          { style: { display: "inline-flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", minWidth: 0 } },
+          (0, import_react2.createElement)("button", { style: modeBtnStyle(!namedActive && !sshActive), onClick: selectQuick }, t("modeQuick")),
+          (0, import_react2.createElement)("button", { style: modeBtnStyle(namedActive), onClick: selectNamed }, t("modeNamed")),
+          (0, import_react2.createElement)("button", { style: modeBtnStyle(sshActive), onClick: selectSsh }, t("modeSsh"))
+        ),
+        (0, import_react2.createElement)(
+          "div",
+          { style: { marginTop: 6 } },
+          // 刚保存固定域名但当前连接仍是随机域名：需关闭后重新开启才生效
+          namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? "") ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedTakeEffect")) : null,
+          // 固定域名：已保存摘要 + 修改入口（非编辑态）
+          namedMode && !tunnelCfg ? (0, import_react2.createElement)(
+            "div",
+            { style: { ...styles.muted } },
+            fmt(t, "namedSummary", { host: tunnelModeView.hostname || "\u2014", token: tunnelModeView.tokenSet ? t("namedTokenSet") : t("namedTokenMissing") }),
+            (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setTunnelCfg({ hostname: tunnelModeView.hostname ?? "", token: "", err: null }) }, t("namedEdit")),
+            (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("namedHow")),
+            !tunnelModeView.tokenSet || !tunnelModeView.hostname ? (0, import_react2.createElement)("div", { style: { marginTop: 2, color: "var(--dsw-alias-state-error-primary,#dc2626)" } }, t("namedNeedCfg")) : null
+          ) : null,
+          // 固定域名：编辑表单（域名 + Tunnel Token，Token 留空保持不变）
+          tunnelCfg ? (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.6 } },
+            (0, import_react2.createElement)(
+              "div",
+              null,
+              t("namedHostnameLabel"),
+              (0, import_react2.createElement)("input", {
+                style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 200 },
+                placeholder: "pocket.example.com",
+                value: tunnelCfg.hostname ?? "",
+                autoFocus: true,
+                onChange: (e) => setTunnelCfg((c) => ({ ...c, hostname: e.target.value.trim(), err: null })),
+                onKeyDown: (e) => {
+                  if (e.key === "Enter") saveNamedTunnel();
+                  if (e.key === "Escape") setTunnelCfg(null);
+                }
+              })
+            ),
+            (0, import_react2.createElement)(
+              "div",
+              { style: { marginTop: 6 } },
+              t("namedTokenLabel"),
+              (0, import_react2.createElement)("input", {
+                style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 240, fontFamily: "ui-monospace,Menlo,monospace" },
+                type: "password",
+                value: tunnelCfg.token ?? "",
+                onChange: (e) => setTunnelCfg((c) => ({ ...c, token: e.target.value.trim(), err: null })),
+                onKeyDown: (e) => {
+                  if (e.key === "Enter") saveNamedTunnel();
+                  if (e.key === "Escape") setTunnelCfg(null);
+                }
+              })
+            ),
+            (0, import_react2.createElement)(
+              "div",
+              { style: { marginTop: 6, display: "flex", gap: 8 } },
+              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: saveNamedTunnel }, t("save")),
+              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => setTunnelCfg(null) }, t("cancel"))
+            ),
+            (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("namedHow")),
+            (0, import_react2.createElement)("div", { style: { marginTop: 2, fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("namedSecurity")),
+            tunnelCfg.err ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(tunnelCfg.err)) : null
+          ) : null
+        )
+      ),
+      // SSH 通道：状态 + 地址/二维码 + 配置表单（选中 SSH 或正在编辑时显示）
+      sshSection,
+      // Quick/Named 运行中：二维码 + 防钓鱼提示（SSH 的二维码在 SSH 区块内）
       tunnelUrl ? (0, import_react2.createElement)(
         "div",
         null,
         qrArea(status.tunnelQr, tunnelUrl, namedMode ? t("namedRunningHint") : t("wanHint")),
-        // 防钓鱼 / 别收藏（issue #82）：公网链接仅本次有效、勿收藏提示
-        (0, import_react2.createElement)("div", { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, borderLeft: "4px solid var(--dsw-alias-state-warn-primary,#b45309)", background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", borderRadius: 8, padding: "8px 10px" } }, t("wanEphemeralWarn")),
-        // 地址模式行（随机/固定；固定域名选中或编辑时高亮）
-        row(
-          t("modeLabel"),
-          (0, import_react2.createElement)(
-            "span",
-            { style: { display: "inline-flex", gap: 6 } },
-            (0, import_react2.createElement)("button", { style: modeBtnStyle(!namedActive), onClick: namedMode ? switchToQuick : tunnelCfg ? () => setTunnelCfg(null) : void 0 }, t("modeQuick")),
-            (0, import_react2.createElement)("button", { style: modeBtnStyle(namedActive), onClick: () => setTunnelCfg(tunnelCfg ? null : { hostname: tunnelModeView.hostname ?? "", token: "", err: null }) }, t("modeNamed"))
-          ),
-          (0, import_react2.createElement)(
-            "div",
-            { style: { marginTop: 6 } },
-            // 刚保存固定域名但当前连接仍是随机域名：需关闭后重新开启才生效
-            namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? "") ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedTakeEffect")) : null,
-            // 固定域名：已保存摘要 + 修改入口（非编辑态）
-            namedMode && !tunnelCfg ? (0, import_react2.createElement)(
-              "div",
-              { style: { ...styles.muted } },
-              fmt(t, "namedSummary", { host: tunnelModeView.hostname || "\u2014", token: tunnelModeView.tokenSet ? t("namedTokenSet") : t("namedTokenMissing") }),
-              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setTunnelCfg({ hostname: tunnelModeView.hostname ?? "", token: "", err: null }) }, t("namedEdit")),
-              (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("namedHow")),
-              !tunnelModeView.tokenSet || !tunnelModeView.hostname ? (0, import_react2.createElement)("div", { style: { marginTop: 2, color: "var(--dsw-alias-state-error-primary,#dc2626)" } }, t("namedNeedCfg")) : null
-            ) : null,
-            // 固定域名：编辑表单（域名 + Tunnel Token，Token 留空保持不变）
-            tunnelCfg ? (0, import_react2.createElement)(
-              "div",
-              { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.6 } },
-              (0, import_react2.createElement)(
-                "div",
-                null,
-                t("namedHostnameLabel"),
-                (0, import_react2.createElement)("input", {
-                  style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 200 },
-                  placeholder: "pocket.example.com",
-                  value: tunnelCfg.hostname ?? "",
-                  autoFocus: true,
-                  onChange: (e) => setTunnelCfg((c) => ({ ...c, hostname: e.target.value.trim(), err: null })),
-                  onKeyDown: (e) => {
-                    if (e.key === "Enter") saveNamedTunnel();
-                    if (e.key === "Escape") setTunnelCfg(null);
-                  }
-                })
-              ),
-              (0, import_react2.createElement)(
-                "div",
-                { style: { marginTop: 6 } },
-                t("namedTokenLabel"),
-                (0, import_react2.createElement)("input", {
-                  style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 240, fontFamily: "ui-monospace,Menlo,monospace" },
-                  type: "password",
-                  value: tunnelCfg.token ?? "",
-                  onChange: (e) => setTunnelCfg((c) => ({ ...c, token: e.target.value.trim(), err: null })),
-                  onKeyDown: (e) => {
-                    if (e.key === "Enter") saveNamedTunnel();
-                    if (e.key === "Escape") setTunnelCfg(null);
-                  }
-                })
-              ),
-              (0, import_react2.createElement)(
-                "div",
-                { style: { marginTop: 6, display: "flex", gap: 8 } },
-                (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: saveNamedTunnel }, t("save")),
-                (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => setTunnelCfg(null) }, t("cancel"))
-              ),
-              (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("namedHow")),
-              (0, import_react2.createElement)("div", { style: { marginTop: 2, fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("namedSecurity")),
-              tunnelCfg.err ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(tunnelCfg.err)) : null
-            ) : null
-          )
+        (0, import_react2.createElement)("div", { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, borderLeft: "4px solid var(--dsw-alias-state-warn-primary,#b45309)", background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", borderRadius: 8, padding: "8px 10px" } }, t("wanEphemeralWarn"))
+      ) : null,
+      // 访问密码行：值 + 自定义（公网共享 PIN，Quick/Named/SSH 三种通道共用；公网开启后显示）
+      publicRunning && status?.accessToken ? row(
+        t("pinLabel"),
+        customPin?.which === "public" ? null : (0, import_react2.createElement)(
+          "span",
+          { style: { display: "inline-flex", alignItems: "center", gap: 8 } },
+          (0, import_react2.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.accessToken),
+          customBtn("public")
         ),
-        // 访问密码行：值 + 自定义（自定义输入态整体替换）
-        status.accessToken ? row(
-          t("pinLabel"),
-          customPin?.which === "public" ? null : (0, import_react2.createElement)(
-            "span",
-            { style: { display: "inline-flex", alignItems: "center", gap: 8 } },
-            (0, import_react2.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.accessToken),
-            customBtn("public")
-          ),
-          (0, import_react2.createElement)(
-            "div",
-            { style: { marginTop: 6 } },
-            customPin?.which === "public" ? customPinRow("public") : null,
-            status?.publicPinCustom ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("pinCustomHint")) : null,
-            namedMode ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedSecurity")) : null
-          )
-        ) : null
+        (0, import_react2.createElement)(
+          "div",
+          { style: { marginTop: 6 } },
+          customPin?.which === "public" ? customPinRow("public") : null,
+          status?.publicPinCustom ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("pinCustomHint")) : null,
+          namedMode ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedSecurity")) : null
+        )
       ) : null
     ),
     (0, import_react2.createElement)(
@@ -2666,6 +3526,201 @@ function PocketSettingsTab({ rpcCall, t }) {
         t("mobileRightbar"),
         Switch(status?.mobileRightbarEnabled !== false, () => setMobileRightbar(status?.mobileRightbarEnabled === false)),
         (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("mobileRightbarHint"))
+      )
+    ),
+    // 通知与 PWA（task-6）：Web Push 订阅 + Webhook；旧宿主不返回 notify 字段时降级提示
+    (0, import_react2.createElement)(
+      "div",
+      { style: styles.block },
+      (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("notifyTitle")),
+      !status ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanStarting")) : !notifyView ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("hostUnsupported")) : (0, import_react2.createElement)(
+        "div",
+        null,
+        // Web Push 总开关 + 说明（浏览器推送依赖厂商服务，可能延迟）
+        row(
+          t("notifyPush"),
+          Switch(notifyView.pushEnabled === true, () => setNotifyFlag("pushEnabled", notifyView.pushEnabled !== true)),
+          (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("notifyPushHint"))
+        ),
+        // 订阅数量 + 本机订阅/取消（浏览器要求：必须在用户手势里调用）
+        row(
+          fmt(t, "notifySubsCount", { n: notifyView.subscriptionCount ?? 0 }),
+          (0, import_react2.createElement)(
+            "div",
+            { style: styles.btnRow },
+            (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: subscribePush, disabled: notifyBusy || !pushApiReady }, t("notifySubscribe")),
+            (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: unsubscribePush, disabled: notifyBusy }, t("notifyUnsubscribe"))
+          ),
+          (0, import_react2.createElement)(
+            "div",
+            null,
+            !pushApiReady ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("notifyPushUnsupported")) : null,
+            // 有订阅时才给「清空全部订阅」（手机换浏览器/清数据后的残留订阅）
+            (notifyView.subscriptionCount ?? 0) > 0 ? (0, import_react2.createElement)(
+              "div",
+              { style: { marginTop: 6 } },
+              clearSubsAsk ? (0, import_react2.createElement)(
+                "div",
+                { style: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" } },
+                (0, import_react2.createElement)("span", { style: { ...styles.warn, flex: "1 1 100%" } }, t("notifyClearConfirm")),
+                (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: clearSubscriptions, disabled: notifyBusy }, t("confirm")),
+                (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setClearSubsAsk(false) }, t("cancel"))
+              ) : (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setClearSubsAsk(true) }, t("notifyClear"))
+            ) : null
+          )
+        ),
+        // 发送测试通知
+        row(
+          t("notifyTest"),
+          (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: sendTestNotification, disabled: notifyBusy }, notifyBusy ? t("notifyTesting") : t("notifyTest"))
+        ),
+        // 最近一次推送结果（notify.status 的 lastResults；宿主没返回就不显示）
+        (0, import_react2.createElement)(
+          "div",
+          { style: { ...styles.muted, marginTop: 6, wordBreak: "break-word" } },
+          notifyLastResult ? fmt(t, "notifyLastResult", { text: resultText(notifyLastResult) }) : t("notifyNoResult")
+        ),
+        // 任务完成时推送（与 Webhook 无关的全局开关）
+        row(t("notifyOnTaskDone"), Switch(notifyView.onTaskDone !== false, () => setNotifyFlag("onTaskDone", notifyView.onTaskDone === false))),
+        // Webhook：开关 + 预设/URL/密钥/间隔（开启后才展开字段，保持页面紧凑）
+        row(
+          t("notifyWebhook"),
+          Switch(notifyView.webhookEnabled === true, () => setNotifyFlag("webhookEnabled", notifyView.webhookEnabled !== true)),
+          (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 6 } },
+            (0, import_react2.createElement)("div", { style: { ...styles.muted } }, t("notifyWebhookHint")),
+            notifyView.webhookEnabled ? (0, import_react2.createElement)(
+              "div",
+              null,
+              sshField(
+                t("notifyPreset"),
+                (0, import_react2.createElement)(
+                  "select",
+                  { style: styles.select, value: notifyForm.preset, onChange: (e) => patchNotifyForm({ preset: e.target.value }) },
+                  NOTIFY_PRESETS2.map(([value, key]) => (0, import_react2.createElement)("option", { key: value, value }, t(key)))
+                )
+              ),
+              sshField(t("notifyUrl"), sshInput(notifyForm.url, (v) => patchNotifyForm({ url: v.trim() }), { placeholder: "https://\u2026" })),
+              sshField(
+                t("notifySecret"),
+                sshInput(notifyForm.secret, (v) => patchNotifyForm({ secret: v }), { type: "password", placeholder: notifyView.webhookConfigured ? t("notifySecretSet") : "" }),
+                notifyView.webhookConfigured ? t("notifySecretSet") : t("notifySecretHint")
+              ),
+              sshField(
+                t("notifyMinInterval"),
+                sshInput(notifyForm.minInterval, (v) => patchNotifyForm({ minInterval: v }), { inputMode: "numeric", placeholder: t("notifyMinIntervalPlaceholder") }),
+                t("notifyMinIntervalHint")
+              ),
+              (0, import_react2.createElement)(
+                "div",
+                { style: { marginTop: 10 } },
+                (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: saveNotifyConfig, disabled: notifyBusy }, t("save"))
+              )
+            ) : null
+          )
+        ),
+        // PWA 安装提示：可安装时给按钮，否则给一句为什么不可安装
+        row(
+          t("pwaRow"),
+          canInstall ? (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: promptInstall }, t("pwaInstall")) : null,
+          (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, canInstall ? null : pwaReason())
+        )
+      )
+    ),
+    // 通行密钥设备（task-6）：启用开关 + rpId + 设备列表（重命名/撤销）
+    (0, import_react2.createElement)(
+      "div",
+      { style: styles.block },
+      (0, import_react2.createElement)(
+        "div",
+        { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
+        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("passkeyTitle")),
+        passkeyView ? Switch(passkeyView.enabled === true, () => setPasskeyEnabled(passkeyView.enabled !== true)) : null
+      ),
+      !status ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanStarting")) : !passkeyView ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("hostUnsupported")) : (0, import_react2.createElement)(
+        "div",
+        null,
+        (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("passkeyHint")),
+        // 三态说明：非安全上下文 → 浏览器不支持 → 可用
+        (0, import_react2.createElement)(
+          "div",
+          { style: { marginTop: 6, fontSize: 12, lineHeight: 1.5, color: !webAuthn.secure || !webAuthn.supported ? COLOR_ERR : "var(--dsw-alias-label-tertiary,#8b93a1)" } },
+          !webAuthn.secure ? t("passkeyInsecure") : !webAuthn.supported ? t("passkeyUnsupported") : t("passkeySecureHint")
+        ),
+        row(
+          t("passkeyRpId"),
+          (0, import_react2.createElement)(
+            "span",
+            { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12, wordBreak: "break-all" } },
+            passkeyView.rpId || (typeof location !== "undefined" ? location.hostname : "\u2014")
+          )
+        ),
+        row(
+          fmt(t, "passkeyDeviceCount", { n: passkeyView.deviceCount ?? 0 }),
+          (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: loadDevices, disabled: passkeyBusy }, t("refresh"))
+        ),
+        // 设备列表：名称 / 注册时间 / 最后登录 + 重命名/撤销（撤销两步确认，避免误触）
+        (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 12, marginTop: 10 } }, t("passkeyDevices")),
+        devicesErr ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR, fontSize: 12, marginTop: 6, wordBreak: "break-word" } }, fmt(t, "passkeyLoadFailed", { err: errText(devicesErr) })) : null,
+        devices && devices.length === 0 && !devicesErr ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("passkeyNoDevices")) : null,
+        (devices ?? []).map((d, i) => (0, import_react2.createElement)(
+          "div",
+          { key: String(d?.id ?? d?.credentialId ?? i), style: { borderTop: "1px solid var(--dsw-alias-border-l2,#e5e7eb)", paddingTop: 8, marginTop: 8 } },
+          (0, import_react2.createElement)(
+            "div",
+            { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" } },
+            (0, import_react2.createElement)("span", { style: { fontSize: 13, wordBreak: "break-word", minWidth: 0 } }, d?.name || t("passkeyUnnamed")),
+            (0, import_react2.createElement)(
+              "div",
+              { style: styles.btnRow },
+              (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => {
+                setRevokeId(null);
+                setRenameId(d?.id);
+                setRenameVal(d?.name ?? "");
+              } }, t("passkeyRename")),
+              (0, import_react2.createElement)("button", { style: { ...styles.miniBtn, color: COLOR_ERR }, onClick: () => {
+                setRenameId(null);
+                setRevokeId(d?.id);
+              } }, t("passkeyRevoke"))
+            )
+          ),
+          (0, import_react2.createElement)(
+            "div",
+            { style: { ...styles.muted, marginTop: 2, wordBreak: "break-word" } },
+            `${t("passkeyColCreated")}: ${fmtTime(d?.createdAt, "\u2014")} \xB7 ${t("passkeyColLastLogin")}: ${fmtTime(d?.lastLoginAt, t("passkeyNever"))}`
+          ),
+          // 重命名：内联输入，回车保存
+          renameId === d?.id ? (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" } },
+            (0, import_react2.createElement)("input", {
+              style: { ...styles.input, maxWidth: 180 },
+              value: renameVal,
+              autoFocus: true,
+              maxLength: 40,
+              onChange: (e) => setRenameVal(e.target.value),
+              onKeyDown: (e) => {
+                if (e.key === "Enter") doRenameDevice(d?.id);
+                if (e.key === "Escape") setRenameId(null);
+              }
+            }),
+            (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => doRenameDevice(d?.id) }, t("save")),
+            (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setRenameId(null) }, t("cancel"))
+          ) : null,
+          // 撤销：先给后果说明，再确认
+          revokeId === d?.id ? (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 6 } },
+            (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("passkeyRevokeConfirm")),
+            (0, import_react2.createElement)(
+              "div",
+              { style: { marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" } },
+              (0, import_react2.createElement)("button", { style: { ...styles.miniBtn, color: COLOR_ERR }, onClick: () => doRevokeDevice(d?.id) }, t("passkeyRevoke")),
+              (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setRevokeId(null) }, t("cancel"))
+            )
+          ) : null
+        ))
       )
     ),
     error ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, marginTop: 8 } }, `\u274C ${errText(error)}`) : null,

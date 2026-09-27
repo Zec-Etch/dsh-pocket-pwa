@@ -1,11 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { setTimeout } from 'node:timers/promises';
 import { apply } from '../lib/index.js';
-import { POCKET_ENDPOINTS } from '../client/api.js';
+import { POCKET_ENDPOINTS, redactStatus, buildAccessUrl } from '../client/api.js';
+import { zh as POCKET_ZH } from '../client/pocket-locales.js';
 
 async function waitFor(check, message) {
   for (let i = 0; i < 100; i++) {
@@ -107,3 +110,442 @@ test('plugin entry preserves an explicit persistence home override', async (t) =
   await waitFor(() => f.hasMarker(override), 'explicit persistence home was not used');
   assert.equal(await f.hasMarker(), false, 'DSH_HOME must not replace an explicit home');
 });
+
+// ── task-6 冻结契约：新增端点常量 + redactStatus 向后兼容 ─────────────────
+// 前端按这些名字调用（client/index.jsx），后端按同样名字实现（lib/web-rpc.js）。
+// 名字改动会让前端静默失效，所以在这里钉死。
+
+test('client/api.js：三通道/通知/通行密钥端点名沿用 x.y 命名', () => {
+  const expected = {
+    sshSetConfig: 'ssh.setConfig',
+    sshStatus: 'ssh.status',
+    passkeySetEnabled: 'passkey.setEnabled',
+    passkeyList: 'passkey.list',
+    passkeyRevoke: 'passkey.revoke',
+    passkeyRename: 'passkey.rename',
+    notifySetConfig: 'notify.setConfig',
+    notifyStatus: 'notify.status',
+    notifyRemoveSubscription: 'notify.removeSubscription',
+    notifyClearSubscriptions: 'notify.clearSubscriptions',
+    notifyTest: 'notify.test',
+  };
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(expected).map((k) => [k, POCKET_ENDPOINTS[k]])),
+    expected,
+  );
+  // 既有端点名不得被改动
+  assert.equal(POCKET_ENDPOINTS.status, 'pocket.status');
+  assert.equal(POCKET_ENDPOINTS.tunnelStart, 'tunnel.start');
+  assert.equal(POCKET_ENDPOINTS.tunnelSetConfig, 'tunnel.setConfig');
+  assert.equal(POCKET_ENDPOINTS.fileRead, 'pocket.fileRead');
+});
+
+test('redactStatus：旧宿主不返回新字段时不崩，且给出可用默认值', () => {
+  const s = redactStatus({});
+  assert.deepEqual(s.ssh, {
+    running: false,
+    state: 'idle',
+    url: null,
+    qr: null,
+    lastError: null,
+    config: {
+      host: '', port: 22, user: '', keyPathSet: false, remoteBindPort: 7788,
+      accessProtocol: 'https', accessHost: '', accessPort: 0, autoRestore: true,
+    },
+  });
+  assert.deepEqual(s.notify, {
+    pushEnabled: false, onTaskDone: true, webhookEnabled: false, webhookPreset: 'generic',
+    webhookUrl: '', webhookConfigured: false, subscriptionCount: 0, minIntervalSec: null,
+  });
+  assert.deepEqual(s.passkey, { enabled: false, rpId: '', deviceCount: 0 });
+  // 完全空/畸形输入也不能抛
+  assert.equal(redactStatus(undefined).ssh.running, false);
+  assert.equal(redactStatus({ ssh: null, notify: 'x', passkey: 42 }).ssh.state, 'idle');
+});
+
+test('redactStatus：私钥路径 / webhook 密钥 / 设备机密都不外泄', () => {
+  const s = redactStatus({
+    ssh: { running: true, state: 'connected', config: { host: 'vps.example.com', user: 'dsh', keyPath: '/home/u/.ssh/id_ed25519', keyPathSet: true } },
+    notify: { webhookSecret: 'super-secret', webhookUrl: 'https://hook.example.com/x', webhookConfigured: true },
+    passkey: { enabled: true, rpId: 'dsh.example.com', deviceCount: 1, devices: [{ id: 'd1', token: 'plaintext' }] },
+  });
+  assert.equal(s.ssh.config.keyPath, undefined, '私钥路径不回显（只回 keyPathSet）');
+  assert.equal(s.ssh.config.keyPathSet, true);
+  assert.equal(s.notify.webhookSecret, undefined, 'webhook 密钥不回显（只回 webhookConfigured）');
+  assert.equal(s.notify.webhookConfigured, true);
+  assert.equal(s.passkey.devices, undefined, '设备列表不进 status（走 passkey.list）');
+  assert.ok(!JSON.stringify(s).includes('super-secret'), '序列化后不得出现密钥明文');
+  assert.ok(!JSON.stringify(s).includes('id_ed25519'), '序列化后不得出现私钥路径');
+});
+
+test('redactStatus / buildAccessUrl：访问地址按 accessProtocol+accessHost(+accessPort) 拼接', () => {
+  assert.equal(buildAccessUrl({ accessProtocol: 'https', accessHost: 'dsh.example.com', accessPort: 0 }), 'https://dsh.example.com');
+  assert.equal(buildAccessUrl({ accessProtocol: 'https', accessHost: 'dsh.example.com', accessPort: 443 }), 'https://dsh.example.com');
+  assert.equal(buildAccessUrl({ accessProtocol: 'http', accessHost: '1.2.3.4', accessPort: 8080 }), 'http://1.2.3.4:8080');
+  assert.equal(buildAccessUrl({ accessProtocol: 'https', accessHost: '', host: 'vps.example.com' }), 'https://vps.example.com');
+  assert.equal(buildAccessUrl({ accessProtocol: 'https', accessHost: 'x.example.com:8443', accessPort: 8443 }), 'https://x.example.com:8443');
+  assert.equal(buildAccessUrl({}), null);
+  assert.equal(buildAccessUrl(null), null);
+  // 宿主给了 url 就用宿主的；没给就本地按同一规则拼
+  assert.equal(redactStatus({ ssh: { url: 'https://from-host', config: { accessHost: 'x.example.com' } } }).ssh.url, 'https://from-host');
+  assert.equal(redactStatus({ ssh: { config: { accessProtocol: 'http', accessHost: 'dsh.example.com', accessPort: 8000 } } }).ssh.url, 'http://dsh.example.com:8000');
+});
+
+test('redactStatus：字段类型不对时收敛到默认值（不把字符串/NaN 透给 UI）', () => {
+  const s = redactStatus({
+    ssh: { running: 'yes', state: 7, config: { port: '', remoteBindPort: 'abc', accessPort: '8080', accessProtocol: 'ftp', autoRestore: 'no' } },
+    notify: { pushEnabled: 'true', onTaskDone: 'false', subscriptionCount: 'x', webhookPreset: 'telegram', minIntervalSec: '30' },
+    passkey: { enabled: 1, deviceCount: '2' },
+  });
+  assert.equal(s.ssh.running, false, '只认 true');
+  assert.equal(s.ssh.state, 'idle');
+  assert.equal(s.ssh.config.port, 22, '空字符串回退默认端口');
+  assert.equal(s.ssh.config.remoteBindPort, 7788);
+  assert.equal(s.ssh.config.accessPort, 8080, '数字字符串可解析');
+  assert.equal(s.ssh.config.accessProtocol, 'https', '未知协议回退 https');
+  assert.equal(s.ssh.config.autoRestore, true, '只认 false 才关');
+  assert.equal(s.notify.pushEnabled, false);
+  assert.equal(s.notify.onTaskDone, true);
+  assert.equal(s.notify.subscriptionCount, 0);
+  assert.equal(s.notify.webhookPreset, 'generic');
+  assert.equal(s.notify.minIntervalSec, 30, '宿主返回的最小间隔透传（缺失才是 null）');
+  assert.equal(s.passkey.enabled, false);
+  assert.equal(s.passkey.deviceCount, 2);
+});
+
+// ── task-6：设置页渲染冒烟 ────────────────────────────────────────────────
+// 沙箱里没有 react / react-dom / jsdom，也不允许起子进程。这里用最小 React 桩执行
+// **打包产物**里的设置页组件（client/client.js）：h() 变成可遍历的普通对象，
+// useState/useEffect/useRef 按最小语义实现。目的不是替代浏览器，而是真把渲染树
+// 跑一遍——未定义变量、空值访问、宿主字段缺失都会立刻抛；并驱动关键按钮验证
+// RPC 载荷。跑之前需要先构建 client/client.js。
+
+const FLUSH = () => setTimeout(0); // node:timers/promises：await 一轮宏任务 + 微任务
+
+/** 最小 React 桩：createElement + useState/useEffect/useRef。 */
+function createReactStub() {
+  const cells = [];
+  const pending = [];
+  const api = {
+    __index: 0,
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
+    useState: (init) => {
+      const i = api.__index++;
+      if (!(i in cells)) cells[i] = typeof init === 'function' ? init() : init;
+      const set = (next) => {
+        const value = typeof next === 'function' ? next(cells[i]) : next;
+        if (value !== cells[i]) cells[i] = value;
+      };
+      return [cells[i], set];
+    },
+    useEffect: (fn, deps) => {
+      const i = api.__index++;
+      const prev = cells[i];
+      const changed = prev === undefined || deps === undefined || deps.some((d, k) => d !== prev.deps[k]);
+      if (changed) pending.push({ i, fn, deps });
+    },
+    useRef: (init) => {
+      const i = api.__index++;
+      if (!(i in cells)) cells[i] = { current: init };
+      return cells[i];
+    },
+  };
+  /** 渲染一轮 + 跑本轮新挂的副作用 + 等在跑完的 setState 落定。 */
+  const pass = async (Component, props) => {
+    api.__index = 0;
+    const tree = Component(props);
+    const cleanups = [];
+    for (const e of pending.splice(0)) {
+      cells[e.i] = { deps: e.deps };
+      const cleanup = e.fn();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    }
+    await FLUSH();
+    await FLUSH();
+    for (const cleanup of cleanups) cleanup(); // 清掉 load 的定时器，避免测试进程挂住
+    return tree;
+  };
+  return { api, pass };
+}
+
+function collect(node, pred, out = []) {
+  if (Array.isArray(node)) { for (const n of node) collect(n, pred, out); return out; }
+  if (!node || typeof node !== 'object') return out;
+  if (node.type !== undefined && pred(node)) out.push(node);
+  if (node.children) collect(node.children, pred, out);
+  return out;
+}
+function textOf(node) {
+  if (node === null || node === undefined || node === false || node === true) return '';
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (typeof node !== 'object') return String(node);
+  return textOf(node.children);
+}
+
+/** 挂载打包产物里的设置页组件（真实组件代码 → 真实渲染树 + 可点的按钮）。 */
+async function mountSettingsTab({ status, push = null, rpc = () => ({}) }) {
+  const rpcCalls = [];
+  const store = new Map();
+  const storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k) };
+  const navigatorStub = { clipboard: { writeText: async () => {} }, serviceWorker: {}, standalone: false, userAgent: 'node' };
+  const element = () => ({ dataset: {}, style: {}, content: '', name: '', parentElement: null, setAttribute() {}, remove() {}, appendChild() {}, select() {}, removeChild() {} });
+  const body = { setAttribute() {}, removeAttribute() {} };
+  const documentStub = { body, head: { appendChild: () => {} }, createElement: element, querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, execCommand: () => true };
+  const windowStub = {
+    location: { href: 'http://127.0.0.1:3080/', hostname: '127.0.0.1', protocol: 'http:' },
+    navigator: navigatorStub,
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    isSecureContext: true, PublicKeyCredential: function PublicKeyCredential() {},
+    dshPocketPush: push,
+  };
+  const react = createReactStub();
+  // 定时器全部换成不落地的桩：组件里的轮询/Toast 定时器不需要真的跑，
+  // 也让测试进程不会因为残留 handle 挂住（清理函数照常调用）。
+  const noTimer = () => 0;
+  const sandbox = {
+    window: windowStub, document: documentStub, navigator: navigatorStub,
+    localStorage: storage, sessionStorage: storage, location: windowStub.location,
+    CustomEvent, URL, console,
+    setTimeout: noTimer, setInterval: noTimer, clearTimeout: () => {}, clearInterval: () => {},
+  };
+  let loadedModule = null;
+  windowStub.__ModuleLoader__ = { load: (m) => { loadedModule = m; } };
+  runInNewContext(readFileSync(new URL('../client/client.js', import.meta.url), 'utf8'), sandbox);
+  assert.ok(loadedModule?.factory, '打包产物没有调用 window.__ModuleLoader__.load');
+  assert.equal(loadedModule.id, 'dsh-pocket', '打包产物模块 id 固定');
+  const mod = loadedModule.factory((id) => {
+    if (id === 'react') return react.api;
+    // 移动端组件用的图标（只在这些组件内部用到，本测试不渲染它们）
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') {
+      const icon = () => null;
+      return { IconPanelLeftOutline16: icon, IconFolderOpenOutline16: icon, IconDownloadOutline16: icon };
+    }
+    throw new Error(`unexpected require("${id}")`);
+  });
+
+  let Tab = null;
+  const ctx = {
+    // 与真实宿主一致：RPC 失败返回 { ok:false, error }，而不是抛异常
+    connection: {
+      rpc: {
+        call: async (_channel, endpoint, payload) => {
+          rpcCalls.push({ endpoint, payload });
+          const value = rpc(endpoint, payload);
+          if (value === undefined) return { ok: false, error: { message: `unsupported ${endpoint}` } };
+          return { ok: true, value };
+        },
+      },
+    },
+    locale: { bind: () => (key) => (key in POCKET_ZH ? POCKET_ZH[key] : key), register: () => () => {} },
+    slots: { inject: (_name, cb) => cb(), register: (config, comp) => { if (config?.id === 'pocket') Tab = comp; return () => {}; } },
+    effect: (cb) => { const d = cb(); return typeof d === 'function' ? d : () => {}; },
+  };
+  mod.apply(ctx);
+  assert.equal(typeof Tab, 'function', '设置页组件没有注册到 settings.section');
+
+  const t = (key) => (key in POCKET_ZH ? POCKET_ZH[key] : key);
+  const props = () => ({ rpcCall: (endpoint, payload) => ctx.connection.rpc.call(null, endpoint, payload), t });
+  let tree = null;
+  const render = async () => { tree = await react.pass(Tab, props()); return tree; };
+  const buttonsOf = (label) => collect(tree, (n) => n.type === 'button').filter((b) => textOf(b) === label);
+  return {
+    get tree() { return tree; },
+    settle: async (rounds = 4) => { for (let i = 0; i < rounds; i++) await render(); return tree; },
+    rpcCalls,
+    buttons: buttonsOf,
+    /** 点击按钮（可按文案取第 index 个），点完重渲染一轮。 */
+    click: async (label, index = 0) => {
+      const node = buttonsOf(label)[index];
+      assert.ok(node, `找不到按钮「${label}」#${index}；当前按钮：${collect(tree, (n) => n.type === 'button').map(textOf).join(' / ')}`);
+      await node.props.onClick?.();
+      await FLUSH();
+      await render();
+      return node;
+    },
+    clickNode: async (node) => { await node.props.onClick?.(); await FLUSH(); await render(); },
+    texts: () => collect(tree, () => true).map(textOf).join(' | '),
+    nodes: (pred) => collect(tree, pred),
+    /** 卡片根的直接子区块里，文本包含该文案 key 的那个（用于定位区块内的开关）。 */
+    section: (key) => (tree?.children ?? []).find((c) => c && typeof c === 'object' && textOf(c).includes(POCKET_ZH[key])),
+  };
+}
+
+/** 新宿主（task-5 契约）完整 status 快照。 */
+const FULL_STATUS = {
+  proxyRunning: true, proxyPort: 3081, lanUrl: 'http://192.168.1.5:3081', lanQr: 'data:qr-lan',
+  lanCandidates: ['192.168.1.5'], lanIpOverride: '', tunnelRunning: false, tunnelUrl: null, tunnelQr: null,
+  tunnelState: { phase: 'idle' }, tunnelConfig: { mode: 'ssh', hostname: '', tokenSet: false },
+  dshPort: 3080, desktop: false, restartNotice: false, killHint: 'lsof -ti :3080 | xargs kill -9',
+  accessToken: 'PIN12345', lanToken: 'LAN12345', lanAuthEnabled: true, lanEnabled: true,
+  mobileRightbarEnabled: true, publicPinCustom: false, lanPinCustom: false,
+  ssh: {
+    running: true, state: 'connected', url: 'https://dsh.example.com', qr: 'data:qr-ssh', lastError: null,
+    config: { host: 'vps.example.com', port: 22, user: 'dsh', keyPathSet: true, remoteBindPort: 7788, accessProtocol: 'https', accessHost: 'dsh.example.com', accessPort: 0, autoRestore: true },
+  },
+  notify: { pushEnabled: true, onTaskDone: true, webhookEnabled: true, webhookPreset: 'wecom', webhookUrl: 'https://hook.example.com/x', webhookConfigured: true, subscriptionCount: 2, minIntervalSec: 30 },
+  passkey: { enabled: true, rpId: 'dsh.example.com', deviceCount: 1 },
+};
+
+/** 旧宿主：status 里完全没有 ssh / notify / passkey 三块（向后兼容路径）。 */
+const LEGACY_STATUS = {
+  proxyRunning: true, proxyPort: 3081, lanUrl: 'http://192.168.1.5:3081', lanQr: 'data:qr-lan',
+  lanCandidates: [], lanIpOverride: '', tunnelRunning: false, tunnelUrl: null, tunnelQr: null,
+  tunnelState: { phase: 'idle' }, tunnelConfig: { mode: 'quick', hostname: '', tokenSet: false },
+  dshPort: 3080, desktop: false, restartNotice: false, killHint: 'x',
+  accessToken: null, lanToken: 'LAN12345', lanAuthEnabled: true, lanEnabled: true,
+  mobileRightbarEnabled: true, publicPinCustom: false, lanPinCustom: false,
+};
+
+function fullRpc(endpoint) {
+  if (endpoint === POCKET_ENDPOINTS.status) return FULL_STATUS;
+  if (endpoint === POCKET_ENDPOINTS.passkeyList) {
+    return { devices: [{ id: 'dev-1', name: 'iPhone', createdAt: 1700000000000, lastLoginAt: 1700000500000 }] };
+  }
+  if (endpoint === POCKET_ENDPOINTS.notifyStatus) {
+    return { ...FULL_STATUS.notify, lastResults: [{ channel: 'push', ok: true, status: 201, at: 1700000600000 }] };
+  }
+  // 写操作按契约返回完整 status（前端 setStatus 直接替换），避免把 state 打空
+  if ([
+    POCKET_ENDPOINTS.tunnelStart, POCKET_ENDPOINTS.tunnelStop, POCKET_ENDPOINTS.tunnelSetConfig,
+    POCKET_ENDPOINTS.sshSetConfig, POCKET_ENDPOINTS.notifySetConfig, POCKET_ENDPOINTS.passkeySetEnabled,
+    POCKET_ENDPOINTS.pocketReset, POCKET_ENDPOINTS.lanSetOverride,
+  ].includes(endpoint)) return FULL_STATUS;
+  return {};
+}
+
+test('设置页（task-6）：新宿主完整状态渲染不崩，三通道/通知/通行密钥区块齐全', async () => {
+  const pushCalls = [];
+  const installEvent = { prompt: async () => { pushCalls.push('prompt'); }, userChoice: Promise.resolve({ outcome: 'accepted' }) };
+  const tab = await mountSettingsTab({
+    status: FULL_STATUS,
+    rpc: fullRpc,
+    push: {
+      supported: true,
+      subscribe: async () => { pushCalls.push('subscribe'); return { ok: true }; },
+      unsubscribe: async () => { pushCalls.push('unsubscribe'); return { ok: true }; },
+      installPrompt: () => installEvent,
+    },
+  });
+  await tab.settle();
+  const texts = tab.texts();
+  for (const key of ['sshTitle', 'sshStateConnected', 'sshRunningHint', 'notifyTitle', 'notifyPush', 'pwaRow', 'passkeyTitle', 'passkeyDevices', 'passkeySecureHint']) {
+    assert.ok(texts.includes(POCKET_ZH[key]), `设置页缺少「${POCKET_ZH[key]}」`);
+  }
+  assert.ok(texts.includes('iPhone'), '通行密钥设备列表没渲染');
+  assert.ok(texts.includes('dsh.example.com'), 'SSH 访问地址没渲染');
+  assert.ok(texts.includes(`Web Push · ${POCKET_ZH.notifyResultOk}`), '最近推送结果没渲染');
+  // 关键按钮都在，且可安装时给出「安装到主屏」
+  assert.ok(tab.buttons(POCKET_ZH.sshStop).length, 'SSH 运行中应显示「停止隧道」');
+  assert.ok(tab.buttons(POCKET_ZH.sshTest).length, '应有「测试连接」');
+  assert.ok(tab.buttons(POCKET_ZH.notifyTest).length, '应有「发送测试通知」');
+  assert.ok(tab.buttons(POCKET_ZH.notifyClear).length, '有订阅时应显示「清空全部订阅」');
+  assert.ok(tab.buttons(POCKET_ZH.passkeyRevoke).length, '设备行应有「撤销」');
+  assert.ok(tab.buttons(POCKET_ZH.pwaInstall).length, '可安装时应显示「安装到主屏」');
+
+  // 订阅/取消必须在用户手势里直接调用 window.dshPocketPush
+  await tab.click(POCKET_ZH.notifySubscribe);
+  assert.deepEqual(pushCalls, ['subscribe']);
+  await tab.click(POCKET_ZH.notifyUnsubscribe);
+  assert.deepEqual(pushCalls, ['subscribe', 'unsubscribe']);
+  // 发送测试通知 → notify.test
+  await tab.click(POCKET_ZH.notifyTest);
+  assert.ok(tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.notifyTest), '测试通知没打到 notify.test');
+  // PWA 安装 → 消费缓存的 beforeinstallprompt
+  await tab.click(POCKET_ZH.pwaInstall);
+  assert.deepEqual(pushCalls, ['subscribe', 'unsubscribe', 'prompt']);
+
+  // 撤销设备：两步确认（先看后果，再撤销）→ passkey.revoke { id }
+  await tab.click(POCKET_ZH.passkeyRevoke);
+  await tab.settle(2);
+  assert.ok(tab.texts().includes(POCKET_ZH.passkeyRevokeConfirm), '撤销前必须显示后果说明');
+  await tab.click(POCKET_ZH.passkeyRevoke, 1);
+  const revoke = tab.rpcCalls.find((c) => c.endpoint === POCKET_ENDPOINTS.passkeyRevoke);
+  assert.ok(revoke, '撤销设备没打到 passkey.revoke');
+  assert.equal(revoke.payload?.id, 'dev-1');
+
+  // 重命名：输入框回车提交 → passkey.rename { id, name }
+  await tab.click(POCKET_ZH.passkeyRename);
+  await tab.settle(2);
+  const renameInput = tab.nodes((n) => n.type === 'input' && n.props.maxLength === 40 && n.props.value === 'iPhone')[0];
+  assert.ok(renameInput, '重命名输入框没渲染');
+  renameInput.props.onChange({ target: { value: '办公 iPhone' } });
+  await tab.settle(1); // React 语义：输入后重渲染，事件处理器才拿到新值
+  const renameInput2 = tab.nodes((n) => n.type === 'input' && n.props.maxLength === 40)[0];
+  await renameInput2.props.onKeyDown({ key: 'Enter' });
+  await tab.settle(2);
+  const rename = tab.rpcCalls.find((c) => c.endpoint === POCKET_ENDPOINTS.passkeyRename);
+  assert.ok(rename, '重命名没打到 passkey.rename');
+  assert.deepEqual({ id: rename.payload?.id, name: rename.payload?.name }, { id: 'dev-1', name: '办公 iPhone' });
+
+  // 通行密钥总开关（区块标题行的 switch）→ passkey.setEnabled { on }
+  const passkeySwitch = collect(tab.section('passkeyTitle'), (n) => n.type === 'button' && n.props.role === 'switch')[0];
+  assert.ok(passkeySwitch, '通行密钥区块没渲染开关');
+  await tab.clickNode(passkeySwitch);
+  const toggle = tab.rpcCalls.find((c) => c.endpoint === POCKET_ENDPOINTS.passkeySetEnabled);
+  assert.ok(toggle, '通行密钥开关没打到 passkey.setEnabled');
+  assert.deepEqual({ ...toggle.payload }, { on: false });
+});
+
+test('设置页（task-6）：SSH 保存/测试连接走冻结端点，字段与契约一致', async () => {
+  const tab = await mountSettingsTab({ status: FULL_STATUS, rpc: fullRpc });
+  await tab.settle();
+  // 改 SSH 主机后再保存：ssh.setConfig 必须带 mode:'ssh' + 全部字段
+  const hostInput = tab.nodes((n) => n.type === 'input' && n.props.value === 'vps.example.com')[0];
+  assert.ok(hostInput, 'SSH 主机输入框没渲染');
+  hostInput.props.onChange({ target: { value: 'vps2.example.com' } });
+  await tab.settle(2);
+  await tab.click(POCKET_ZH.save, 0); // 树里第一个「保存」＝SSH 区块的保存
+  const saved = tab.rpcCalls.find((c) => c.endpoint === POCKET_ENDPOINTS.sshSetConfig);
+  assert.ok(saved, '保存 SSH 配置没打到 ssh.setConfig');
+  // 注意用展开复制成宿主对象再比：vm 上下文里的对象原型不同，deepStrictEqual 会误报
+  assert.deepEqual({ ...saved.payload }, {
+    mode: 'ssh', host: 'vps2.example.com', user: 'dsh', port: 22, keyPath: '',
+    remoteBindPort: 7788, accessProtocol: 'https', accessHost: 'dsh.example.com', accessPort: 0, autoRestore: true,
+  });
+  // 测试连接 → ssh.status { test: true }
+  await tab.click(POCKET_ZH.sshTest);
+  const probe = tab.rpcCalls.find((c) => c.endpoint === POCKET_ENDPOINTS.sshStatus);
+  assert.ok(probe, '测试连接没打到 ssh.status');
+  assert.deepEqual({ ...probe.payload }, { test: true });
+  // 运行中：stop 按钮走 tunnel.stop（不新增端点）
+  await tab.click(POCKET_ZH.sshStop);
+  assert.ok(tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.tunnelStop), '停止隧道没打到 tunnel.stop');
+  // 切到固定域名：只展开既有表单，不立刻改模式（保存时才切）
+  await tab.click(POCKET_ZH.modeNamed);
+  await tab.settle(1);
+  assert.ok(tab.texts().includes(POCKET_ZH.namedHostnameLabel), '切到固定域名应展开既有表单');
+  // 切回 Quick：沿用既有 tunnel.setConfig（三通道互斥，保存即生效）
+  await tab.click(POCKET_ZH.modeQuick);
+  const quick = tab.rpcCalls.find((c) => c.endpoint === POCKET_ENDPOINTS.tunnelSetConfig);
+  assert.ok(quick, '切回 Quick 没打到 tunnel.setConfig');
+  assert.deepEqual({ ...quick.payload }, { mode: 'quick' });
+});
+
+test('设置页（task-6）：旧宿主（无 ssh/notify/passkey 字段）只降级提示，不崩不白屏', async () => {
+  const tab = await mountSettingsTab({
+    status: LEGACY_STATUS,
+    rpc: (endpoint) => (endpoint === POCKET_ENDPOINTS.status ? LEGACY_STATUS : {}),
+  });
+  await tab.settle();
+  const texts = tab.texts();
+  assert.ok(texts.includes(POCKET_ZH.lanAccess), '旧宿主下原有局域网区块必须照常渲染');
+  assert.ok(texts.includes(POCKET_ZH.wanAccess), '旧宿主下原有公网区块必须照常渲染');
+  // texts() 会把祖先容器的文本也算进来，所以按「卡片根的直接子区块」计数
+  const notedBlocks = () => (tab.tree?.children ?? []).filter((c) => c && typeof c === 'object' && textOf(c).includes(POCKET_ZH.hostUnsupported));
+  assert.equal(notedBlocks().length, 2, '通知/通行密钥两个状态块应给出明确提示');
+  // SSH 区块只在选中 SSH 时展开：旧宿主上点它也要能打开并明确说「本版本不支持」
+  await tab.click(POCKET_ZH.modeSsh);
+  await tab.settle(2);
+  assert.equal(notedBlocks().length, 3, '点开 SSH 后应出现第三个提示块');
+  assert.ok(tab.texts().includes(POCKET_ZH.sshTitle), 'SSH 区块打开后应有标题');
+  // 旧宿主不该去调新端点（避免无谓报错噪音）
+  const called = new Set(tab.rpcCalls.map((c) => c.endpoint));
+  assert.ok(!called.has(POCKET_ENDPOINTS.passkeyList), '旧宿主不该请求 passkey.list');
+  assert.ok(!called.has(POCKET_ENDPOINTS.notifyStatus), '旧宿主不该请求 notify.status');
+  assert.ok(!called.has(POCKET_ENDPOINTS.sshSetConfig), '旧宿主不该写 ssh.setConfig');
+  // 非 HTTPS（局域网 http）时通行密钥文案优先解释安全上下文
+  assert.ok(texts.includes(POCKET_ZH.passkeyInsecure) || texts.includes(POCKET_ZH.hostUnsupported));
+});
+
+
