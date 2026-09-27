@@ -51,7 +51,16 @@ function fakeSpawn() {
 
 /** 一次就绪行（OpenSSH -v 的真实输出形态，dev-env 在真机上实测过）。 */
 const FORWARD_OK_LINE = 'debug1: remote forward success for: listen 127.0.0.1:7788, connect 127.0.0.1:3081';
-const FORWARD_FAIL_LINE = 'Warning: remote port forwarding failed for listen port 7788';
+/**
+ * 转发失败的两条真实形态（dev-env 真机/真 ssh 实测）：
+ *   - 本插件**始终**带 ExitOnForwardFailure=yes（buildSshArgs 固定加），
+ *     所以干净行是 `Error: …`；`debug1: …` 是 -v 下先冒出来的那条。
+ *   - `Warning: …` 只在**不带** ExitOnForwardFailure 时才出现，作为次要形态保留。
+ * 主用例必须用生产真会出现的字符串，否则夹具会掩盖将来「干净行识别失效」的回归。
+ */
+const FORWARD_FAIL_LINE = 'Error: remote port forwarding failed for listen port 7788';
+const FORWARD_FAIL_DEBUG_LINE = 'debug1: remote forward failure for: listen 127.0.0.1:7788, connect 127.0.0.1:3081';
+const FORWARD_FAIL_WARNING_LINE = 'Warning: remote port forwarding failed for listen port 7788';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -148,7 +157,8 @@ test('createSshChannel：指定 keyPath 时加 -i + IdentitiesOnly；远端端�
   await sleep(10);
   const st = ch.status();
   assert.equal(st.state, 'failed', '远端端口被占 → 立即 failed，不能让 UI 显示已连接');
-  assert.match(st.lastError ?? '', /forwarding failed|7788/);
+  assert.equal(st.lastError, FORWARD_FAIL_LINE, '主用例：生产真实形态（Error: …，因为始终带 ExitOnForwardFailure）');
+  assert.equal(st.lastError, `Error: remote port forwarding failed for listen port ${DEFAULT_REMOTE_BIND_PORT}`);
   assert.equal(st.running, false);
 });
 
@@ -297,7 +307,7 @@ test('O3：connected 但没有结构化证据（消息为空 / 无 stderr）→ 
   ch5.stop();
 });
 
-test('O2：-v 下 lastError 优先展示干净的 forward-fail 行（debug1 行被替换），拿不到干净行则保持原样', async () => {
+test('O2：-v 下 lastError 展示观测到的干净原文（真实形态 Error: …）；干净行未到则原样显示 debug1，不臆造', async () => {
   const { spawnImpl, children } = fakeSpawn();
   const ch = createSshChannel({
     getConfig: () => ({ host: 'vps.example.com', user: 'dsh' }),
@@ -308,19 +318,44 @@ test('O2：-v 下 lastError 优先展示干净的 forward-fail 行（debug1 行�
   });
   ch.start();
   // 真机顺序：debug1 行先到（分类器据此 settleFatal），干净那行随后到
-  children[0].stderr.emit('data', `${FORWARD_FAIL_LINE.replace('Warning', 'debug1')}\n`);
+  children[0].stderr.emit('data', `${FORWARD_FAIL_DEBUG_LINE}\n`);
   await sleep(10);
   const beforeClean = ch.status();
   assert.equal(beforeClean.state, 'failed');
-  assert.match(beforeClean.lastError ?? '', /^debug1:/, '只有 debug 行时如实显示它（不编造文案）');
+  assert.equal(beforeClean.lastError, FORWARD_FAIL_DEBUG_LINE, '只有 debug 行时**原样**显示它（不合成 Error: 文案）');
+  assert.ok(!/^Error:/.test(String(beforeClean.lastError)), '干净行没到，就绝不臆造干净文案');
 
   children[0].stderr.emit('data', `${FORWARD_FAIL_LINE}\n`);
   const afterClean = ch.status();
   assert.equal(
     afterClean.lastError,
     FORWARD_FAIL_LINE,
-    '干净行一到就替换展示（O2：用户该看到 Warning: remote port forwarding failed for listen port 7788）',
+    '干净行走的是观测原文（生产真实形态：Error: remote port forwarding failed for listen port 7788）',
   );
+  assert.equal(afterClean.lastError, 'Error: remote port forwarding failed for listen port 7788');
+  ch.stop();
+});
+
+test('O2（次要形态）：不带 ExitOnForwardFailure 时的 Warning: 前缀同样被识别并展示为观测原文', async () => {
+  const { spawnImpl, children } = fakeSpawn();
+  const ch = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'dsh' }),
+    getLocalPort: () => 3081,
+    spawnImpl,
+    reconnect: false,
+    log: () => {},
+  });
+  ch.start();
+  children[0].stderr.emit('data', `${FORWARD_FAIL_DEBUG_LINE}\n`);
+  await sleep(10);
+  assert.match(String(ch.status().lastError), /^debug1:/, '先到的是 debug 行');
+  children[0].stderr.emit('data', `${FORWARD_FAIL_WARNING_LINE}\n`);
+  assert.equal(
+    ch.status().lastError,
+    FORWARD_FAIL_WARNING_LINE,
+    'Warning 变体也走同一套「等值替换」，两种前缀都不会被漏掉',
+  );
+  assert.equal(ch.status().lastError, 'Warning: remote port forwarding failed for listen port 7788');
   ch.stop();
 });
 

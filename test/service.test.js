@@ -926,7 +926,14 @@ function fakeSshSpawn() {
 }
 
 const SSH_OK_LINE = 'debug1: remote forward success for: listen 127.0.0.1:7788, connect 127.0.0.1:3081';
-const SSH_FAIL_LINE = 'Warning: remote port forwarding failed for listen port 7788';
+/**
+ * 转发失败的真实形态（dev-env 真机实测）：
+ *   - 本插件始终带 ExitOnForwardFailure=yes → 干净行是 `Error: …`（主用例）；
+ *   - `Warning: …` 只在不带该选项时出现（次要形态，见 test/ssh-channel.test.js）；
+ *   - `debug1: …` 是 -v 下先冒出来的那条，分类器据此 settleFatal。
+ */
+const SSH_FAIL_LINE = 'Error: remote port forwarding failed for listen port 7788';
+const SSH_FAIL_DEBUG_LINE = 'debug1: remote forward failure for: listen 127.0.0.1:7788, connect 127.0.0.1:3081';
 
 /** 临时 DSH_HOME；返回 { home, settings }（settings 每次读盘，等价于真实进程）。 */
 function withTempHome(prefix = 'dshp-service-') {
@@ -1034,14 +1041,24 @@ test('SSH 通道：远端端口被占（forwarding failed）→ startTunnel 立�
     started.catch(() => {}); // 防未处理 rejection 噪音
     await new Promise((r) => setTimeout(r, 30));
     // 真机顺序（-v 常开）：debug1 变体先到并触发 fatal，干净那行紧随其后
-    ssh.children[0].stderr.emit('data', `${SSH_FAIL_LINE.replace('Warning', 'debug1')}\n`);
+    ssh.children[0].stderr.emit('data', `${SSH_FAIL_DEBUG_LINE}\n`);
     ssh.children[0].stderr.emit('data', `${SSH_FAIL_LINE}\n`);
-    await assert.rejects(() => started, /forwarding failed|7788/, '远端端口占用必须如实报错');
+    // dev-env 独立验证的真实性质：startSshTunnel 抛出的就是**干净原文**（不是 debug1 那行）。
+    // 注意 assert.rejects 传正则时比对的是 String(err)（含 "Error: " 前缀），
+    // 这里用校验函数直接比对 err.message，断言更精确。
+    await assert.rejects(
+      () => started,
+      (err) => {
+        assert.equal(err.message, 'Error: remote port forwarding failed for listen port 7788');
+        return true;
+      },
+      '远端端口占用必须如实报错，且用生产真实的干净文案',
+    );
     const st = await service.status();
     assert.equal(st.ssh.state, 'failed', '失败态可见（UI 不会显示已连接）');
     assert.match(String(st.ssh.lastError), /7788/);
     // O2：展示层优先干净文案（不再是 debug1: 那条）
-    assert.equal(st.ssh.lastError, SSH_FAIL_LINE, 'lastError 用干净的 Warning 行');
+    assert.equal(st.ssh.lastError, SSH_FAIL_LINE, 'lastError 用干净的 Error 行（ExitOnForwardFailure 下的真实形态）');
     assert.ok(!String(st.ssh.lastError).startsWith('debug1:'), '不再把 debug 文案给用户看');
     assert.equal(st.ssh.evidence, null, '非 connected → evidence null');
     assert.equal(st.ssh.running, false, 'failed 不是 running（不会误报已开启）');
