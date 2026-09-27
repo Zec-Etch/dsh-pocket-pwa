@@ -887,3 +887,514 @@ test('startTunnel 同步抛错后不残留 rejected 的 in-flight（TDZ 回归�
   assert.equal((await service.status()).tunnelRunning, true, '隧道确实起来了');
   await service.dispose();
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第三通道 SSH + 通知 / 通行密钥 RPC（task-5）
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinPath } from 'node:path';
+import { createPasskeyStore } from '../lib/passkey-store.mjs';
+import { createPushStore } from '../lib/push-store.mjs';
+import { createNotifyHook, NOTIFY_TEST_TITLE } from '../lib/notify-hook.mjs';
+
+/** 假 ssh 子进程：可手动喂 stderr（就绪行 / 致命错误）。 */
+function fakeSshChild() {
+  const child = new EventEmitter();
+  child.pid = 777;
+  child.stdout = new EventEmitter();
+  child.stdout.resume = () => {};
+  child.stderr = new EventEmitter();
+  child.stderr.resume = () => {};
+  child.kill = () => { setImmediate(() => child.emit('exit', 0, null)); return true; };
+  return child;
+}
+
+/** 假 spawn：记录 ssh argv，返回可喂 stderr 的子进程。 */
+function fakeSshSpawn() {
+  const calls = [];
+  const children = [];
+  const spawnImpl = (cmd, args) => {
+    const child = fakeSshChild();
+    calls.push({ cmd, args });
+    children.push(child);
+    return child;
+  };
+  return { spawnImpl, calls, children };
+}
+
+const SSH_OK_LINE = 'debug1: remote forward success for: listen 127.0.0.1:7788, connect 127.0.0.1:3081';
+const SSH_FAIL_LINE = 'Warning: remote port forwarding failed for listen port 7788';
+
+/** 临时 DSH_HOME；返回 { home, settings }（settings 每次读盘，等价于真实进程）。 */
+function withTempHome(prefix = 'dshp-service-') {
+  const home = mkdtempSync(joinPath(tmpdir(), prefix));
+  const prev = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  const restore = () => {
+    if (prev === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prev;
+  };
+  return { home, restore };
+}
+
+test('SSH 通道（垂直）：startTunnel(mode=ssh) 用 ssh 反向隧道，不碰 cloudflared；地址/二维码/私钥脱敏', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const ssh = fakeSshSpawn();
+  const internals = stubInternals();
+  let cloudflaredStarted = 0;
+  internals.startTunnel = async () => { cloudflaredStarted += 1; return 'https://should-not-be-used.trycloudflare.com'; };
+  internals.sshSpawnImpl = ssh.spawnImpl;
+
+  settings.setTunnelMode('ssh');
+  settings.setSshHost('vps.example.com');
+  settings.setSshUser('dsh');
+  settings.setSshKeyPath('~/.ssh/id_ed25519');
+  settings.setAccessHost('dsh.example.com');
+  settings.setAccessPort(8443);
+
+  const service = createPocketService({
+    dshPort: 3080,
+    port: 3081,
+    home,
+    internals,
+    getSshConfig: () => settings.sshChannelConfig(),
+    getTunnelConfig: () => ({ mode: settings.tunnelMode() }),
+  });
+  try {
+    const started = service.startTunnel(); // 不等 await：先喂就绪行
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(ssh.calls.length, 1, '真的 spawn 了 ssh');
+    assert.equal(ssh.calls[0].cmd, 'ssh');
+    assert.ok(ssh.calls[0].args.includes('-v'), '带 -v（就绪行是 connected 的证据）');
+    assert.equal(ssh.calls[0].args[ssh.calls[0].args.indexOf('-i') + 1], '~/.ssh/id_ed25519');
+    ssh.children[0].stderr.emit('data', `${SSH_OK_LINE}\n`);
+    const url = await started;
+    assert.equal(url, 'https://dsh.example.com:8443', '地址由 accessProtocol + accessHost + accessPort 拼出');
+    assert.equal(cloudflaredStarted, 0, 'ssh 模式绝不调用 cloudflared');
+
+    const st = await service.status();
+    assert.equal(st.ssh.running, true);
+    assert.equal(st.ssh.state, 'connected');
+    assert.equal(st.ssh.evidence, 'forward-ok');
+    assert.equal(st.ssh.url, 'https://dsh.example.com:8443');
+    assert.equal(st.ssh.qr, 'data:qr;https://dsh.example.com:8443', 'ssh 地址也有二维码（走同一套 QR 编码器）');
+    assert.equal(st.ssh.lastError, null);
+    assert.equal(st.tunnelRunning, true, '公网出口在跑');
+    assert.equal(st.tunnelUrl, null, 'tunnelUrl 只表示 cloudflared');
+    assert.equal(st.tunnelConfig.mode, 'ssh', '模式透出给前端（互斥高亮用）');
+    // 私钥脱敏：只有 keyPathSet 布尔值
+    assert.equal(st.ssh.config.keyPathSet, true);
+    assert.ok(!JSON.stringify(st).includes('id_ed25519'), 'status 不含私钥路径');
+    assert.ok(!JSON.stringify(st).includes('"keyPath"'), 'status 不含 keyPath 字段');
+    assert.equal(st.ssh.config.host, 'vps.example.com');
+    assert.equal(st.ssh.config.remoteBindPort, 7788);
+
+    // 停止：ssh 进程被杀、状态回到 idle
+    service.stopTunnel();
+    const st2 = await service.status();
+    assert.equal(st2.ssh.running, false);
+    assert.equal(st2.ssh.state, 'stopped');
+    assert.equal(st2.tunnelRunning, false);
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});
+
+test('SSH 通道：远端端口被占（forwarding failed）→ startTunnel 立即报错，状态与 lastError 可见', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const ssh = fakeSshSpawn();
+  const internals = stubInternals();
+  internals.sshSpawnImpl = ssh.spawnImpl;
+  settings.setTunnelMode('ssh');
+  settings.setSshHost('vps.example.com');
+  settings.setSshUser('dsh');
+
+  const service = createPocketService({
+    dshPort: 3080, port: 3081, home, internals,
+    getSshConfig: () => settings.sshChannelConfig(),
+    getTunnelConfig: () => ({ mode: settings.tunnelMode() }),
+  });
+  try {
+    const started = service.startTunnel();
+    started.catch(() => {}); // 防未处理 rejection 噪音
+    await new Promise((r) => setTimeout(r, 30));
+    ssh.children[0].stderr.emit('data', `${SSH_FAIL_LINE}\n`);
+    await assert.rejects(() => started, /forwarding failed|7788/, '远端端口占用必须如实报错');
+    const st = await service.status();
+    assert.equal(st.ssh.state, 'failed', '失败态可见（UI 不会显示已连接）');
+    assert.match(String(st.ssh.lastError), /7788/);
+    assert.equal(st.tunnelState.phase, 'error');
+    assert.match(String(st.tunnelState.detail), /7788/);
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});
+
+test('SSH 通道：模式互斥 —— 从 ssh 切回 cloudflared 会停掉 ssh；ssh 模式下不允许两条通道并存', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const ssh = fakeSshSpawn();
+  const internals = stubInternals();
+  internals.sshSpawnImpl = ssh.spawnImpl;
+  internals.startTunnel = async () => {
+    internals.started.push('cloudflared');
+    return 'https://abc-123.trycloudflare.com';
+  };
+
+  settings.setTunnelMode('ssh');
+  settings.setSshHost('vps.example.com');
+  settings.setSshUser('dsh');
+  const service = createPocketService({
+    dshPort: 3080, port: 3081, home, internals,
+    getSshConfig: () => settings.sshChannelConfig(),
+    getTunnelConfig: () => ({ mode: settings.tunnelMode() }),
+  });
+  try {
+    const p = service.startTunnel();
+    await new Promise((r) => setTimeout(r, 30));
+    ssh.children[0].stderr.emit('data', `${SSH_OK_LINE}\n`);
+    await p;
+    assert.equal((await service.status()).ssh.running, true);
+
+    // 切到 named：syncTunnelMode 应关掉 ssh
+    settings.setTunnelMode('named');
+    settings.setTunnelHostname('pocket.example.com');
+    settings.setTunnelToken('eyJhIjoiY2xvdWRmbGFyZS10b2tlbi1leGFtcGxlLXZhbHVlIn0');
+    service.syncTunnelMode();
+    const st = await service.status();
+    assert.equal(st.ssh.running, false, '切走模式后 ssh 通道被关掉（三通道互斥）');
+    assert.equal(st.tunnelConfig.mode, 'named');
+
+    // 从 named 切回 ssh：不该留下 cloudflared（这里 cloudflared 没起，验证反向分支）
+    settings.setTunnelMode('ssh');
+    service.syncTunnelMode();
+    assert.equal((await service.status()).tunnelRunning, false, 'cloudflared 没在跑，不会凭空出现');
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});
+
+test('SSH 自动恢复：marker + mode=ssh + autoRestore=true 自动拉起；autoRestore=false 时尊重设置', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const ssh = fakeSshSpawn();
+  const internals = stubInternals();
+  internals.sshSpawnImpl = ssh.spawnImpl;
+  settings.setTunnelMode('ssh');
+  settings.setSshHost('vps.example.com');
+  settings.setSshUser('dsh');
+
+  const makeService = () => createPocketService({
+    dshPort: 3080, port: 3081, home, internals,
+    getSshConfig: () => settings.sshChannelConfig(),
+    getTunnelConfig: () => ({ mode: settings.tunnelMode() }),
+    log: { info() {}, warn() {}, error() {}, log() {} },
+  });
+  try {
+    // 1) 没有标记 → 不恢复
+    const s1 = makeService();
+    await s1.restoreTunnelIfNeeded();
+    assert.equal(ssh.calls.length, 0, '没有 tunnel-auto.json 标记就不拉起');
+    await s1.dispose();
+
+    // 2) 先手动开启一次（写入标记），再模拟 DSH 重启
+    const s2 = makeService();
+    const p = s2.startTunnel();
+    await new Promise((r) => setTimeout(r, 30));
+    ssh.children[0].stderr.emit('data', `${SSH_OK_LINE}\n`);
+    await p;
+    await new Promise((r) => setTimeout(r, 20)); // 标记异步落盘
+    s2.stopTunnel({ keepAutoMarker: true });     // 进程退出语义：保留标记
+
+    const ssh2 = fakeSshSpawn();
+    internals.sshSpawnImpl = ssh2.spawnImpl;
+    const s3 = makeService();
+    await s3.restoreTunnelIfNeeded();
+    assert.equal(ssh2.calls.length, 1, 'DSH 重启后按标记自动拉起 ssh');
+    const s3p = new Promise((r) => setTimeout(r, 30));
+    await s3p;
+    if (ssh2.children[0]) ssh2.children[0].stderr.emit('data', `${SSH_OK_LINE}\n`);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal((await s3.status()).ssh.running, true, '恢复后确实在跑');
+    await s3.dispose();
+    await s2.dispose();
+
+    // 3) 用户关掉 sshAutoRestore → 不再恢复
+    settings.setSshAutoRestore(false);
+    const ssh3 = fakeSshSpawn();
+    internals.sshSpawnImpl = ssh3.spawnImpl;
+    const s4 = makeService();
+    await s4.restoreTunnelIfNeeded();
+    assert.equal(ssh3.calls.length, 0, 'autoRestore=false 时不自动拉起');
+    await s4.dispose();
+
+    // 4) 手动关闭公网（keepAutoMarker=false）会删标记 → 下次启动不恢复
+    settings.setSshAutoRestore(true);
+    const s5 = makeService();
+    s5.stopTunnel();
+    await new Promise((r) => setTimeout(r, 20));
+    const ssh4 = fakeSshSpawn();
+    internals.sshSpawnImpl = ssh4.spawnImpl;
+    const s6 = makeService();
+    await s6.restoreTunnelIfNeeded();
+    assert.equal(ssh4.calls.length, 0, '手动关闭后不再自动恢复');
+    await s6.dispose();
+    await s5.dispose();
+  } finally {
+    restore();
+  }
+});
+
+test('RPC ssh.setConfig / ssh.status：写配置并切模式、返回完整 status；test:true 回真实探测结论', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const ssh = fakeSshSpawn();
+  const internals = stubInternals();
+  internals.sshSpawnImpl = ssh.spawnImpl;
+  const service = createPocketService({
+    dshPort: 3080, port: 3081, home, internals,
+    getSshConfig: () => settings.sshChannelConfig(),
+    getTunnelConfig: () => ({ mode: settings.tunnelMode() }),
+  });
+  const conn = fakeCtxConnection();
+  installPocketRpc({ connection: conn }, {
+    service,
+    getToken: () => '99999999',
+    getTunnelConfig: () => ({ mode: settings.tunnelMode(), hostname: settings.tunnelHostname(), tokenSet: settings.tunnelToken().length > 0 }),
+    ssh: {
+      get: () => settings.sshChannelConfig(),
+      set: (patch) => {
+        if (patch.mode) settings.setTunnelMode(patch.mode);
+        if (patch.host !== undefined) settings.setSshHost(patch.host);
+        if (patch.user !== undefined) settings.setSshUser(patch.user);
+        if (patch.port !== undefined) settings.setSshPort(patch.port);
+        if (patch.keyPath !== undefined) settings.setSshKeyPath(patch.keyPath);
+        if (patch.remoteBindPort !== undefined) settings.setSshRemoteBindPort(patch.remoteBindPort);
+        if (patch.accessProtocol !== undefined) settings.setAccessProtocol(patch.accessProtocol);
+        if (patch.accessHost !== undefined) settings.setAccessHost(patch.accessHost);
+        if (patch.accessPort !== undefined) settings.setAccessPort(patch.accessPort);
+        if (patch.autoRestore !== undefined) settings.setSshAutoRestore(patch.autoRestore);
+        return settings.sshChannelConfig();
+      },
+      status: async ({ test }) => {
+        const block = (await service.status()).ssh ?? null;
+        if (!test) return { ssh: block };
+        // 与 lib/index.js 同形：探测后再取一次 status（探测可能刚把通道拉起来）
+        const probe = await service.testSshConnection({ timeoutMs: 200 });
+        return { ssh: (await service.status()).ssh ?? block, test: probe };
+      },
+    },
+    log: { error() {}, warn() {} },
+  });
+  await service.startProxy();
+  try {
+    const saved = await conn.handler(POCKET_ENDPOINTS.sshSetConfig, {
+      mode: 'ssh', host: 'VPS.Example.com', user: 'dsh', port: 2222, keyPath: '~/.ssh/id_ed25519',
+      remoteBindPort: 8899, accessProtocol: 'https', accessHost: 'dsh.example.com', accessPort: 0, autoRestore: true,
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(saved.value.tunnelConfig.mode, 'ssh', '保存即切模式（三选一互斥）');
+    assert.equal(saved.value.ssh.config.host, 'vps.example.com', '归一化后落盘');
+    assert.equal(saved.value.ssh.config.port, 2222);
+    assert.equal(saved.value.ssh.config.remoteBindPort, 8899);
+    assert.equal(saved.value.ssh.config.keyPathSet, true);
+    assert.equal(saved.value.ssh.url, 'https://dsh.example.com', '地址由 access* 拼出');
+    assert.ok(!JSON.stringify(saved.value).includes('id_ed25519'), 'RPC 不回显私钥路径');
+
+    // 校验错误 → bad-request（可读消息透出）
+    const bad = await conn.handler(POCKET_ENDPOINTS.sshSetConfig, { host: 'bad host' });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error.message, /空白|主机名/);
+
+    // 非 test：只回 ssh 区块
+    const plain = await conn.handler(POCKET_ENDPOINTS.sshStatus, {});
+    assert.equal(plain.ok, true);
+    assert.equal(plain.value.ssh.state, 'idle');
+    assert.equal(plain.value.test, undefined);
+
+    // test:true：真实探测（这里让假 ssh 打印就绪行 → ok:true）
+    const probing = conn.handler(POCKET_ENDPOINTS.sshStatus, { test: true });
+    await new Promise((r) => setTimeout(r, 30));
+    ssh.children[ssh.children.length - 1].stderr.emit('data', `${SSH_OK_LINE}\n`);
+    const testRes = await probing;
+    assert.equal(testRes.ok, true);
+    assert.equal(testRes.value.test.ok, true, '探测连上 → ok');
+    assert.equal(testRes.value.ssh.running, true, 'status 同步反映 running');
+    // 探测在非 ssh 模式（这里已是 ssh 模式）不会收摊：进程仍在
+    assert.equal(ssh.calls.length >= 1, true);
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});
+
+test('RPC notify.*：setConfig 不回显 secret（只回 webhookConfigured）；status 形状；test 发一轮并回 results', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const pushStore = createPushStore({ home, log: () => {} });
+  const sent = [];
+  const notifyHook = createNotifyHook({
+    getConfig: () => settings.notifySettings(),
+    pushStore,
+    getPublicUrl: () => 'https://pocket.example.com/',
+    fetchImpl: async (url, init) => { sent.push({ url, init }); return { status: 200, text: async () => '{"code":0}' }; },
+    log: { warn() {}, log() {}, error() {} },
+  });
+  const service = createPocketService({
+    dshPort: 3080,
+    port: 3081,
+    internals: stubInternals(),
+    // 与 lib/index.js 同形：status 里的 notify 区块由宿主注入闭包提供
+    getNotifyStatus: () => ({ ...settings.notifyConfigView(), subscriptionCount: pushStore.count() }),
+  });
+  const conn = fakeCtxConnection();
+  installPocketRpc({ connection: conn }, {
+    service,
+    notify: {
+      setConfig: (patch) => {
+        if (patch.pushEnabled !== undefined) settings.setNotifyPushEnabled(patch.pushEnabled);
+        if (patch.onTaskDone !== undefined) settings.setNotifyOnTaskDone(patch.onTaskDone);
+        if (patch.webhookEnabled !== undefined) settings.setNotifyWebhookEnabled(patch.webhookEnabled);
+        if (patch.webhookPreset !== undefined) settings.setNotifyWebhookPreset(patch.webhookPreset);
+        if (patch.webhookUrl !== undefined) settings.setNotifyWebhookUrl(patch.webhookUrl);
+        if (patch.webhookSecret !== undefined && String(patch.webhookSecret).trim() !== '') settings.setNotifyWebhookSecret(patch.webhookSecret);
+        if (patch.minIntervalSec !== undefined) settings.setNotifyMinIntervalSec(patch.minIntervalSec);
+        return settings.notifyConfigView();
+      },
+      status: () => ({ ...settings.notifyConfigView(), subscriptionCount: pushStore.count(), ...notifyHook.status() }),
+      test: () => notifyHook.sendNow({ title: NOTIFY_TEST_TITLE, body: 'test', tag: 'dsh-test' }),
+      removeSubscription: (e) => pushStore.remove(e),
+      clearSubscriptions: () => pushStore.clear(),
+    },
+    log: { error() {}, warn() {} },
+  });
+  await service.startProxy();
+  try {
+    const saved = await conn.handler(POCKET_ENDPOINTS.notifySetConfig, {
+      pushEnabled: true, onTaskDone: false, webhookEnabled: true, webhookPreset: 'feishu',
+      webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/abc', webhookSecret: 'SECRET-XYZ', minIntervalSec: 30,
+    });
+    assert.equal(saved.ok, true);
+    const notify = saved.value.notify ?? saved.value;
+    assert.equal(notify.webhookConfigured, true, '只回「已配置」');
+    assert.equal(notify.webhookUrl, 'https://open.feishu.cn/open-apis/bot/v2/hook/abc');
+    assert.equal(notify.minIntervalSec, 30, '最小间隔回显（前端要显示）');
+    assert.equal(notify.pushEnabled, true);
+    assert.equal(notify.onTaskDone, false);
+    assert.equal(notify.subscriptionCount, 0);
+    assert.ok(!JSON.stringify(saved.value).includes('SECRET-XYZ'), 'status/RPC 响应里绝不出现 webhook 密钥');
+
+    const st = await conn.handler(POCKET_ENDPOINTS.notifyStatus, {});
+    assert.equal(st.ok, true);
+    assert.equal(st.value.notify.webhookConfigured, true);
+    assert.ok(Array.isArray(st.value.lastResults), 'lastResults 是数组（前端取末条展示）');
+    assert.equal(st.value.notify.minIntervalSec, 30);
+
+    // notify.test：显式动作（onTaskDone=false 也照发），回 results
+    // 推送开着但没订阅 → 一条失败结果；webhook 开着 → 一条成功结果
+    const tested = await conn.handler(POCKET_ENDPOINTS.notifyTest, {});
+    assert.equal(tested.ok, true, JSON.stringify(tested));
+    assert.equal(tested.value.results.length, 2);
+    const hookResult = tested.value.results.find((r) => r.channel === 'webhook');
+    assert.equal(hookResult.ok, true);
+    assert.equal(tested.value.results.find((r) => r.channel === 'push').ok, false, '没订阅的推送如实标失败');
+    assert.equal(sent.length, 1, '真的发了一次 webhook');
+
+    // 只关 webhook、推送还开着但没有订阅 → RPC 成功但结果里如实标失败（UI 弹「没订阅」）
+    settings.setNotifyWebhookEnabled(false);
+    const none = await conn.handler(POCKET_ENDPOINTS.notifyTest, {});
+    assert.equal(none.ok, true);
+    assert.equal(none.value.results[0].channel, 'push');
+    assert.equal(none.value.results[0].ok, false, '没有订阅时不算发送成功');
+    assert.match(String(none.value.results[0].error), /订阅/);
+
+    // 两个渠道都关 → 可读错误
+    settings.setNotifyPushEnabled(false);
+    const noChannel = await conn.handler(POCKET_ENDPOINTS.notifyTest, {});
+    assert.equal(noChannel.ok, false);
+    assert.match(noChannel.error.message, /渠道/);
+
+    const cleared = await conn.handler(POCKET_ENDPOINTS.notifyClearSubscriptions, {});
+    assert.equal(cleared.ok, true, '清空订阅返回完整 status');
+    assert.equal(cleared.value.notify.subscriptionCount, 0);
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});
+
+test('RPC passkey.*：setEnabled 返回完整 status；list/rename/revoke 走真实设备存储；status.passkey 只给 rpId/count', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const passkeyStore = createPasskeyStore({ home });
+  passkeyStore.addCredential({
+    credentialId: 'cred-1',
+    publicKeyJwk: { kty: 'EC', crv: 'P-256', x: 'a'.repeat(43), y: 'b'.repeat(43) },
+    name: '我的手机',
+    signCount: 0,
+  });
+  const service = createPocketService({
+    dshPort: 3080,
+    port: 3081,
+    internals: stubInternals(),
+    // 与 lib/index.js 同形：status 里的 passkey 区块由宿主注入闭包提供
+    getPasskeyStatus: () => ({
+      enabled: settings.passkeyEnabled(),
+      rpId: '',
+      deviceCount: passkeyStore.list().length,
+    }),
+  });
+  const conn = fakeCtxConnection();
+  installPocketRpc({ connection: conn }, {
+    service,
+    passkey: {
+      setEnabled: (on) => settings.setPasskeyEnabled(on),
+      list: () => passkeyStore.list(),
+      revoke: (id) => passkeyStore.revokeDevice(id),
+      rename: (id, name) => passkeyStore.setDeviceName(id, name),
+    },
+    log: { error() {}, warn() {} },
+  });
+  await service.startProxy();
+  try {
+    const on = await conn.handler(POCKET_ENDPOINTS.passkeySetEnabled, { on: true });
+    assert.equal(on.ok, true);
+    assert.equal(on.value.passkey.enabled, true, '返回完整 status（前端 mergeStatus）');
+    assert.equal(settings.passkeyEnabled(), true, '已持久化');
+
+    const list = await conn.handler(POCKET_ENDPOINTS.passkeyList, {});
+    assert.equal(list.ok, true);
+    assert.equal(list.value.devices.length, 1);
+    assert.equal(list.value.devices[0].id, 'cred-1');
+    assert.equal(list.value.devices[0].name, '我的手机');
+    assert.ok(!('tokens' in list.value.devices[0]), '设备列表不含令牌哈希');
+    assert.equal(list.value.passkey.deviceCount, 1);
+
+    const renamed = await conn.handler(POCKET_ENDPOINTS.passkeyRename, { id: 'cred-1', name: 'iPhone 15' });
+    assert.equal(renamed.ok, true);
+    assert.equal(renamed.value.devices[0].name, 'iPhone 15');
+    const missing = await conn.handler(POCKET_ENDPOINTS.passkeyRename, { id: 'nope', name: 'x' });
+    assert.equal(missing.ok, false, '不存在的设备 → bad-request');
+
+    const revoked = await conn.handler(POCKET_ENDPOINTS.passkeyRevoke, { id: 'cred-1' });
+    assert.equal(revoked.ok, true);
+    assert.equal(revoked.value.passkey.deviceCount, 0);
+    assert.equal(passkeyStore.list().length, 0);
+
+    // status 里没有启用时的 rpId 为空（quick 模式），deviceCount 真实
+    const status = await conn.handler(POCKET_ENDPOINTS.status, {});
+    assert.equal(status.value.passkey.enabled, true);
+    assert.equal(status.value.passkey.deviceCount, 0);
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});

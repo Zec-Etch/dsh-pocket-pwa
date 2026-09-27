@@ -121,14 +121,19 @@ test('setCustomPin / rotateAccessToken（issue #33）：8–64 位字母数字�
 
 // ---------- 命名隧道配置（issue #66：固定公网域名） ----------
 
-test('隧道模式（issue #66）：默认 quick，可切 named/quick，非法值拒绝', () => withHome(async () => {
-  const { tunnelMode, setTunnelMode } = await import('../lib/settings.mjs');
+// ---------- 隧道模式（issue #66 + 第三通道 SSH） ----------
+
+test('隧道模式（issue #66 / 第三通道）：默认 quick，可切 named/ssh/quick，非法值拒绝', () => withHome(async () => {
+  const { tunnelMode, setTunnelMode, settingsPath } = await import('../lib/settings.mjs');
   assert.equal(tunnelMode(), 'quick', '默认快速隧道');
   assert.equal(setTunnelMode('named'), 'named', '切换命名隧道');
   assert.equal(tunnelMode(), 'named', '命名模式持久化');
+  assert.equal(setTunnelMode('ssh'), 'ssh', '切换到 SSH 通道');
+  assert.equal(tunnelMode(), 'ssh', 'SSH 模式持久化');
+  assert.equal(JSON.parse(readFileSync(settingsPath(), 'utf8')).tunnelMode, 'ssh', '落盘值正确');
   assert.equal(setTunnelMode('quick'), 'quick', '切回快速隧道');
   assert.equal(tunnelMode(), 'quick', '快速模式持久化');
-  assert.throws(() => setTunnelMode('other'), /quick 或 named/, '非法模式拒绝');
+  assert.throws(() => setTunnelMode('other'), /quick.*named.*ssh/, '非法模式拒绝');
 }));
 
 test('Tunnel Token（issue #66）：设置/清除持久化；过短/非法字符拒绝', () => withHome(async () => {
@@ -225,4 +230,186 @@ test('cloudflared 路径（issue #45）：默认空、可设可清', async () =>
   assert.equal(cloudflaredPath(), '', '清除后回到默认');
   // 空格 trim
   assert.equal(setCloudflaredPath('  /opt/cf/cloudflared  '), '/opt/cf/cloudflared', '自动 trim');
+}));
+
+// ---------- 第三通道：SSH 参数与访问地址 ----------
+
+test('SSH 参数：默认值（22 / 空用户 / 空私钥 / 127.0.0.1:7788 / https / 自动恢复开）', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  assert.equal(s.sshHost(), '', '主机默认未配置');
+  assert.equal(s.sshPort(), 22);
+  assert.equal(s.sshUser(), '');
+  assert.equal(s.sshKeyPath(), '', '默认用 ssh 自己的密钥逻辑');
+  assert.equal(s.sshRemoteBindHost(), '127.0.0.1', '远端默认只绑回环（公网入口交给 Caddy）');
+  assert.equal(s.sshRemoteBindPort(), 7788);
+  assert.equal(s.accessProtocol(), 'https');
+  assert.equal(s.accessHost(), '');
+  assert.equal(s.accessPort(), 0, '0 = 协议默认端口');
+  assert.equal(s.sshAutoRestore(), true, '固定地址通道默认随 DSH 重启自动拉起');
+  assert.equal(s.passkeyEnabled(), false, '通行密钥默认关闭');
+  assert.equal(s.notifyPushEnabled(), false, '推送默认关闭');
+  assert.equal(s.notifyOnTaskDone(), true, '任务完成通知默认开');
+  assert.equal(s.notifyWebhookEnabled(), false);
+  assert.equal(s.notifyWebhookPreset(), 'generic');
+  assert.equal(s.notifyMinIntervalSec(), 10);
+}));
+
+test('SSH 参数：设置/持久化/归一化（URL 粘贴、大小写、去端口）与非法值拒绝', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  assert.equal(s.setSshHost(' VPS.Example.com:2222 '), 'vps.example.com', '去空白/端口、小写');
+  assert.equal(s.sshHost(), 'vps.example.com');
+  assert.equal(s.setSshHost('https://vps2.example.com/path?x=1'), 'vps2.example.com', '粘贴 URL 归一化');
+  assert.equal(s.setSshHost('192.168.1.9'), '192.168.1.9', 'IPv4 允许');
+  assert.equal(s.setSshHost('[::1]'), '::1', 'IPv6 去掉方括号（ssh 目标不需要）');
+  assert.throws(() => s.setSshHost('-oProxyCommand=evil'), /"-"|@/, 'argv 注入防护');
+  assert.throws(() => s.setSshHost('bad host'), /空白/, '含空格拒绝（不静默截断成 bad）');
+  assert.throws(() => s.setSshHost('not a valid name!'), /空白|主机名/, '非法字符拒绝');
+  assert.throws(() => s.setSshHost('user@host'), /@/, '@ 拒绝');
+  assert.equal(s.setSshHost(''), '', '空清除');
+  assert.equal(s.sshHost(), '');
+
+  assert.equal(s.setSshPort('2222'), 2222, '数字串接受');
+  assert.throws(() => s.setSshPort(0), /1\.\.65535/);
+  assert.throws(() => s.setSshPort(70000), /1\.\.65535/);
+  assert.throws(() => s.setSshPort('abc'), /1\.\.65535/);
+
+  assert.equal(s.setSshUser('dsh'), 'dsh');
+  assert.throws(() => s.setSshUser('bad user'), /用户名/);
+  assert.throws(() => s.setSshUser('a'.repeat(65)), /用户名/);
+  assert.equal(s.setSshUser(''), '', '空 = 用系统用户名');
+
+  assert.equal(s.setSshKeyPath('~/.ssh/id_ed25519'), '~/.ssh/id_ed25519');
+  assert.equal(s.sshKeyPath(), '~/.ssh/id_ed25519');
+  const raw = JSON.parse(readFileSync(s.settingsPath(), 'utf8'));
+  assert.equal(raw.sshKeyPath, '~/.ssh/id_ed25519', '只存路径字符串');
+  assert.equal(s.setSshKeyPath(''), '', '空 = 改回默认 ssh 配置');
+
+  assert.equal(s.setSshRemoteBindHost('0.0.0.0'), '0.0.0.0', '允许显式放开（用户自担风险）');
+  assert.equal(s.setSshRemoteBindHost('*'), '*', 'ssh 通配绑定');
+  assert.throws(() => s.setSshRemoteBindHost('bad host'), /绑定地址/);
+  assert.equal(s.setSshRemoteBindPort(7788), 7788);
+  assert.throws(() => s.setSshRemoteBindPort(0), /1\.\.65535/);
+}));
+
+test('访问地址（access*）：协议/域名/端口校验与持久化；accessHost 允许 IPv6 加方括号', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  assert.equal(s.setAccessProtocol('http'), 'http');
+  assert.equal(s.accessProtocol(), 'http');
+  assert.throws(() => s.setAccessProtocol('ftp'), /https 或 http/);
+  assert.equal(s.setAccessProtocol('https'), 'https');
+
+  assert.equal(s.setAccessHost('DSH.Example.com'), 'dsh.example.com');
+  assert.equal(s.setAccessHost('dsh.example.com:8443'), 'dsh.example.com:8443', '允许显式端口');
+  assert.equal(s.setAccessHost('[::1]'), '[::1]', 'IPv6 保留方括号（URL 拼接需要）');
+  assert.equal(s.setAccessHost('[::1]:8443'), '[::1]:8443', 'IPv6 + 端口');
+  assert.throws(() => s.setAccessHost('a'.repeat(300)), /域名/, '超长主机名拒绝（DNS 上限 253）');
+  assert.equal(s.setAccessHost(''), '');
+  assert.equal(s.accessHost(), '');
+
+  assert.equal(s.setAccessPort(8443), 8443);
+  assert.equal(s.setAccessPort(0), 0, '0 = 协议默认端口');
+  assert.throws(() => s.setAccessPort(70000), /0\.\.65535/);
+  assert.equal(s.setSshAutoRestore(false), false);
+  assert.equal(s.sshAutoRestore(), false);
+  assert.equal(s.setSshAutoRestore(true), true, '恢复默认（true 不落盘）');
+}));
+
+test('sshChannelConfig：聚合视图（供 service 启动隧道 / 拼地址，含 access* 与 autoRestore）', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  s.setSshHost('vps.example.com');
+  s.setSshUser('dsh');
+  s.setSshPort(2222);
+  s.setSshKeyPath('~/.ssh/id_ed25519');
+  s.setSshRemoteBindPort(8899);
+  s.setAccessHost('dsh.example.com');
+  s.setAccessPort(8443);
+  s.setAccessProtocol('http');
+  s.setSshAutoRestore(false);
+  const cfg = s.sshChannelConfig();
+  assert.deepEqual(cfg, {
+    host: 'vps.example.com',
+    port: 2222,
+    user: 'dsh',
+    keyPath: '~/.ssh/id_ed25519',
+    remoteBindHost: '127.0.0.1',
+    remoteBindPort: 8899,
+    accessProtocol: 'http',
+    accessHost: 'dsh.example.com',
+    accessPort: 8443,
+    autoRestore: false,
+  });
+}));
+
+// ---------- 通知设置 ----------
+
+test('通知设置：开关持久化、预设白名单、URL 校验、最小间隔范围', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  assert.equal(s.setNotifyPushEnabled(true), true);
+  assert.equal(s.notifyPushEnabled(), true);
+  assert.equal(s.setNotifyOnTaskDone(false), false);
+  assert.equal(s.notifyOnTaskDone(), false);
+  assert.equal(s.setNotifyWebhookEnabled(true), true);
+  assert.equal(s.setNotifyWebhookPreset('WeCom'), 'wecom', '大小写归一化');
+  assert.throws(() => s.setNotifyWebhookPreset('slack'), /webhook 类型/);
+  assert.equal(s.setNotifyWebhookUrl('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc'), 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc');
+  assert.throws(() => s.setNotifyWebhookUrl('not-a-url'), /URL/);
+  assert.throws(() => s.setNotifyWebhookUrl('ftp://example.com/hook'), /http\/https/);
+  assert.equal(s.setNotifyWebhookUrl(''), '');
+  assert.equal(s.setNotifyMinIntervalSec(30), 30);
+  assert.equal(s.setNotifyMinIntervalSec(0), 0, '0 = 不去抖');
+  assert.throws(() => s.setNotifyMinIntervalSec(-1), /0\.\.3600/);
+  assert.throws(() => s.setNotifyMinIntervalSec(9999), /0\.\.3600/);
+}));
+
+test('通知密钥（webhookSecret）：只写不读 —— 设置返回布尔、配置文件有值、对外视图只回 webhookConfigured', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  assert.equal(s.notifyWebhookSecret(), '', '默认空');
+  assert.equal(s.setNotifyWebhookSecret('SECdeadbeef'), true, '设置成功只回布尔（不回显原文）');
+  assert.equal(s.notifyWebhookSecret(), 'SECdeadbeef', '宿主内部（notify-hook）能读到');
+  const raw = JSON.parse(readFileSync(s.settingsPath(), 'utf8'));
+  assert.equal(raw.notifyWebhookSecret, 'SECdeadbeef', '落在 0o600 的 settings.json 里');
+
+  const view = s.notifyConfigView();
+  assert.equal(view.webhookConfigured, true, '对外只回「已配置」');
+  assert.ok(!JSON.stringify(view).includes('SECdeadbeef'), '脱敏视图里没有密钥明文');
+  assert.equal(view.minIntervalSec, 10, 'minIntervalSec 进视图（前端回显用）');
+  const settings = s.notifySettings();
+  assert.equal(settings.webhookSecret, 'SECdeadbeef', 'notifySettings 是宿主内部用的（含明文）');
+
+  assert.equal(s.setNotifyWebhookSecret(''), false, '空字符串清除 → 回 false');
+  assert.equal(s.notifyConfigView().webhookConfigured, false);
+}));
+
+test('通行密钥开关：默认关、可开可关并持久化', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  assert.equal(s.passkeyEnabled(), false);
+  assert.equal(s.setPasskeyEnabled(true), true);
+  assert.equal(s.passkeyEnabled(), true);
+  const raw = JSON.parse(readFileSync(s.settingsPath(), 'utf8'));
+  assert.equal(raw.passkeyEnabled, true);
+  assert.equal(s.setPasskeyEnabled(false), false);
+  assert.equal(s.passkeyEnabled(), false);
+}));
+
+test('恢复出厂设置：SSH / 通知 / 通行密钥设置一并清空', async () => withHome(async () => {
+  const s = await import('../lib/settings.mjs');
+  s.setSshHost('vps.example.com');
+  s.setSshUser('dsh');
+  s.setSshRemoteBindPort(8899);
+  s.setAccessHost('dsh.example.com');
+  s.setNotifyPushEnabled(true);
+  s.setNotifyWebhookUrl('https://hook.example.com/x');
+  s.setNotifyWebhookSecret('SEC123');
+  s.setPasskeyEnabled(true);
+  s.setTunnelMode('ssh');
+  s.resetSettings();
+  assert.equal(s.sshHost(), '');
+  assert.equal(s.sshUser(), '');
+  assert.equal(s.sshRemoteBindPort(), 7788);
+  assert.equal(s.accessHost(), '');
+  assert.equal(s.notifyPushEnabled(), false);
+  assert.equal(s.notifyWebhookUrl(), '');
+  assert.equal(s.notifyWebhookSecret(), '');
+  assert.equal(s.passkeyEnabled(), false);
+  assert.equal(s.tunnelMode(), 'quick', '模式回到 quick（不再自动恢复 SSH）');
 }));

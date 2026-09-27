@@ -1444,3 +1444,611 @@ test('?token=<原始 PIN> 直达种 HttpOnly cookie，issue #35', async () => {
     await new Promise((r) => up.close(r));
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第三通道 / 通行密钥 / 推送（task-5）
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { randomBytes, createECDH, createHash, generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { publicChannelForHost, rpContextFromRequest, PASSKEY_PATHS, PUSH_PATHS, POCKET_PWA_JS_PATH, DEVICE_COOKIE } from '../lib/proxy.mjs';
+import { createPasskeyStore } from '../lib/passkey-store.mjs';
+import { createPushStore } from '../lib/push-store.mjs';
+
+/** 带路径与 Host 的 GET（fetch 不能自定义 Host，见 getWithHost 的说明）。 */
+function getPathWithHost(port, hostHeader, path, extraHeaders = {}, method = 'GET') {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, method, path, headers: { host: hostHeader, ...extraHeaders } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        const body = raw.toString('utf8');
+        let json = null;
+        try { json = JSON.parse(body); } catch { json = null; }
+        resolve({ status: res.statusCode, headers: res.headers, body, raw, json });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** 带 Host 的 JSON POST（可选 cookie / x-forwarded-proto）。 */
+function postJsonWithHost(port, hostHeader, path, body, extraHeaders = {}) {
+  const payload = JSON.stringify(body ?? {});
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port,
+      method: 'POST',
+      path,
+      headers: {
+        host: hostHeader,
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(payload),
+        ...extraHeaders,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch { json = null; }
+        resolve({ status: res.statusCode, headers: res.headers, body: text, json });
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+/** 表单 POST /pocket-login（PIN 登录），返回 set-cookie 里的会话 cookie。 */
+function loginWithPin(port, hostHeader, pin) {
+  const body = `token=${encodeURIComponent(pin)}`;
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      host: '127.0.0.1', port, method: 'POST', path: '/pocket-login',
+      headers: { host: hostHeader, 'content-type': 'application/x-www-form-urlencoded', 'content-length': Buffer.byteLength(body) },
+    }, (res) => {
+      res.resume();
+      res.on('end', () => {
+        const raw = res.headers['set-cookie'] ?? [];
+        const session = raw.find((c) => c.startsWith('dsh_pocket_token='));
+        resolve({ status: res.statusCode, session: session ? session.split(';')[0] : null, location: res.headers.location });
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/** 假上游：返回可注入的 HTML（验证 PWA/通行密钥注入）。 */
+async function fakeUpstreamHtml() {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><head><title>DSH</title></head><body>app</body></html>');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { port: server.address().port, server };
+}
+
+// ---------- 极简 CBOR 编码器 + 软件认证器（与 test/webauthn.test.js 同构，够用即可） ----------
+
+const FLAG_UP = 0x01;
+const FLAG_AT = 0x40;
+const ALG_ES256 = -7;
+const b64u = (buf) => Buffer.from(buf).toString('base64url');
+const sha256 = (buf) => createHash('sha256').update(buf).digest();
+const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
+const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+
+function cborHead(major, len) {
+  if (len < 24) return Buffer.from([(major << 5) | len]);
+  if (len < 0x100) return Buffer.from([(major << 5) | 24, len]);
+  if (len < 0x10000) return Buffer.concat([Buffer.from([(major << 5) | 25]), u16(len)]);
+  return Buffer.concat([Buffer.from([(major << 5) | 26]), u32(len)]);
+}
+
+function cbor(value) {
+  if (Buffer.isBuffer(value)) return Buffer.concat([cborHead(2, value.length), value]);
+  if (value instanceof Map) {
+    const parts = [cborHead(5, value.size)];
+    for (const [k, v] of value) parts.push(cbor(k), cbor(v));
+    return Buffer.concat(parts);
+  }
+  if (Array.isArray(value)) return Buffer.concat([cborHead(4, value.length), ...value.map(cbor)]);
+  if (typeof value === 'number') return value >= 0 ? cborHead(0, value) : cborHead(1, -1 - value);
+  if (typeof value === 'string') {
+    const bytes = Buffer.from(value, 'utf8');
+    return Buffer.concat([cborHead(3, bytes.length), bytes]);
+  }
+  throw new Error(`test CBOR 无法编码 ${String(value)}`);
+}
+
+/** 生成一对 P-256 密钥 + 注册/断言所需的 authData。 */
+function softwareAuthenticator() {
+  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const coseKey = new Map([
+    [1, 2], [3, ALG_ES256], [-1, 1],
+    [-2, Buffer.from(jwk.x, 'base64url')], [-3, Buffer.from(jwk.y, 'base64url')],
+  ]);
+  return {
+    privateKey,
+    jwk,
+    register({ rpId, challenge, origin, credentialId = randomBytes(16), signCount = 0 }) {
+      const authData = Buffer.concat([
+        sha256(Buffer.from(rpId, 'utf8')), Buffer.from([FLAG_UP | FLAG_AT]), u32(signCount),
+        Buffer.alloc(16), u16(credentialId.length), credentialId, cbor(coseKey),
+      ]);
+      const clientData = Buffer.from(JSON.stringify({ type: 'webauthn.create', challenge, origin, crossOrigin: false }), 'utf8');
+      const attestation = cbor(new Map([
+        ['fmt', 'none'],
+        ['authData', authData],
+        ['attStmt', new Map()],
+      ]));
+      return {
+        id: b64u(credentialId),
+        rawId: b64u(credentialId),
+        type: 'public-key',
+        response: { clientDataJSON: b64u(clientData), attestationObject: b64u(attestation) },
+      };
+    },
+    assert({ rpId, challenge, origin, credentialId, signCount = 1 }) {
+      const authData = Buffer.concat([sha256(Buffer.from(rpId, 'utf8')), Buffer.from([FLAG_UP]), u32(signCount)]);
+      const clientData = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin, crossOrigin: false }), 'utf8');
+      const signature = cryptoSign('sha256', Buffer.concat([authData, sha256(clientData)]), { key: this.privateKey, dsaEncoding: 'der' });
+      return {
+        id: credentialId,
+        rawId: credentialId,
+        type: 'public-key',
+        response: {
+          clientDataJSON: b64u(clientData),
+          authenticatorData: b64u(authData),
+          signature: b64u(signature),
+          userHandle: null,
+        },
+      };
+    },
+  };
+}
+
+/** 一条密码学可用的推送订阅（随机 64 字节过不了曲线校验，必须真生成）。 */
+function pushSubscription() {
+  const ecdh = createECDH('prime256v1');
+  ecdh.generateKeys();
+  return {
+    endpoint: `https://push.example.com/send/${randomBytes(6).toString('hex')}`,
+    keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: randomBytes(16).toString('base64url') },
+  };
+}
+
+const CHANNELS = { mode: 'named', named: 'pocket.example.com', ssh: '', quick: '' };
+const PUBLIC_HOST = 'pocket.example.com';
+const PIN = '13572468';
+
+/** 建一个「固定域名通道 + 通行密钥 + 推送」的代理（临时 store，无网络）。 */
+async function thirdChannelFixture({ upstream, passkey = true, channels = CHANNELS, passkeyStore, pushStore } = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'dshp-proxy-pk-'));
+  const store = passkeyStore ?? createPasskeyStore({ home });
+  const proxy = await createPocketProxy({
+    port: 0,
+    host: '127.0.0.1',
+    upstream,
+    heartbeat: false,
+    auth: {
+      sessionKey: 'sk-test',
+      getToken: () => PIN,
+      isProtected: () => true,
+    },
+    passkeyStore: store,
+    getPasskeyEnabled: () => passkey,
+    ...(pushStore ? { pushStore } : {}),
+    getPublicChannels: () => channels,
+    injectHtml: '<script data-dsh-pocket-polyfill="1"></script>',
+  });
+  return { proxy, store, home };
+}
+
+test('publicChannelForHost：只按 Host 主机名精确匹配当前模式的通道，其余返回 null（fail closed）', () => {
+  const channels = { mode: 'named', named: 'pocket.example.com', ssh: 'dsh.example.com', quick: 'abc-123.trycloudflare.com' };
+  assert.equal(publicChannelForHost('pocket.example.com', channels), 'named', '精确匹配固定域名');
+  assert.equal(publicChannelForHost('Pocket.Example.com:8443', channels), 'named', '大小写 + 端口归一化');
+  assert.equal(publicChannelForHost('pocket.example.com.', channels), 'named', '尾点归一化');
+  assert.equal(publicChannelForHost('dsh.example.com', channels), null, '当前模式是 named → ssh 地址不算数（切通道后旧域名必须失效）');
+  assert.equal(publicChannelForHost('evil.example.com', channels), null, '陌生公网 Host');
+  assert.equal(publicChannelForHost('127.0.0.1', channels), null);
+
+  const sshMode = { mode: 'ssh', named: 'pocket.example.com', ssh: 'dsh.example.com', quick: '' };
+  assert.equal(publicChannelForHost('dsh.example.com', sshMode), 'ssh');
+  assert.equal(publicChannelForHost('pocket.example.com', sshMode), null, 'ssh 模式下 named 域名不再算数');
+  assert.equal(publicChannelForHost('[::1]', { mode: 'ssh', ssh: '[::1]' }), 'ssh', 'IPv6 去括号匹配');
+
+  const quickMode = { mode: 'quick', quick: 'abc.trycloudflare.com' };
+  assert.equal(publicChannelForHost('abc.trycloudflare.com', quickMode), 'quick');
+  assert.equal(publicChannelForHost('other.trycloudflare.com', quickMode), null, '同后缀但不同子域不算（不是通配符）');
+
+  // 未给 mode（旧调用）：任意已配置地址都能匹配
+  assert.equal(publicChannelForHost('dsh.example.com', { named: 'pocket.example.com', ssh: 'dsh.example.com' }), 'ssh');
+  assert.equal(publicChannelForHost('nothing.example.com', { named: 'pocket.example.com' }), null);
+});
+
+test('rpContextFromRequest：rpId 来自 Host（去端口），origin 优先 X-Forwarded-Proto，本机回环用 http', () => {
+  const pub = rpContextFromRequest({ headers: { host: 'pocket.example.com' } });
+  assert.equal(pub.rpId, 'pocket.example.com');
+  assert.equal(pub.origin, 'https://pocket.example.com', '默认 https（公网入口）');
+  const proxied = rpContextFromRequest({ headers: { host: 'pocket.example.com:8443', 'x-forwarded-proto': 'http' } });
+  assert.equal(proxied.rpId, 'pocket.example.com');
+  assert.equal(proxied.origin, 'http://pocket.example.com:8443', 'origin 带端口 + 尊重转发协议');
+  const local = rpContextFromRequest({ headers: { host: 'localhost:3081' } });
+  assert.equal(local.origin, 'http://localhost:3081', '本机回环 http 是安全上下文（WebAuthn 允许）');
+  const lan = rpContextFromRequest({ headers: { host: '192.168.1.5:3081' } });
+  assert.equal(lan.rpId, '192.168.1.5', 'rpId 不做策略改写（policyHost 改写后的源 IP 永远不能当 rpId）');
+});
+
+test('通道判定（HTTP）：配置了固定地址时，陌生公网 Host 一律 403，不回落共享 PIN', async () => {
+  const up = await fakeUpstream();
+  const { proxy, home } = await thirdChannelFixture({ upstream: { host: '127.0.0.1', port: up.port } });
+  try {
+    // 匹配固定域名 → 未认证 → 登录页（200，不出 403）
+    const ok = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html' });
+    assert.equal(ok.status, 200);
+    assert.match(ok.body, /访问验证|access PIN/i);
+    // 陌生公网 Host：即使带 ?token=<正确 PIN> 也 403（换域名不能降级/绕闸门）
+    const bad = await getPathWithHost(proxy.port, 'evil.example.com', `/?token=${PIN}`, { accept: 'text/html' });
+    assert.equal(bad.status, 403, 'fail closed');
+    assert.match(bad.body, /unknown-public-host/);
+    assert.equal(bad.headers['cache-control'], 'no-store');
+    // API 请求同样 403 JSON
+    const api = await getPathWithHost(proxy.port, 'evil.example.com', '/api/status', { accept: 'application/json' });
+    assert.equal(api.status, 403);
+    assert.equal(api.json.error, 'unknown-public-host');
+    // loopback 与局域网不受这条规则影响
+    const local = await getPathWithHost(proxy.port, '127.0.0.1', '/', { accept: 'text/html' });
+    assert.equal(local.status, 200, '本机直连不受公网通道判定影响');
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('通道判定（未注入 getPublicChannels）：保持原有语义 —— 陌生公网 Host 走 PIN 闸门而不是 403', async () => {
+  const up = await fakeUpstream();
+  const proxy = await createPocketProxy({
+    port: 0,
+    host: '127.0.0.1',
+    upstream: { host: '127.0.0.1', port: up.port },
+    heartbeat: false,
+    auth: { sessionKey: 'sk', getToken: () => PIN, isProtected: () => true },
+  });
+  try {
+    const res = await getPathWithHost(proxy.port, 'anything.example.com', '/', { accept: 'text/html' });
+    assert.equal(res.status, 200, '旧行为：登录页（向后兼容是守护这条）');
+    assert.match(res.body, /访问验证|access PIN/i);
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+  }
+});
+
+test('通道判定（WebSocket）：陌生公网 Host 的 upgrade 同样 403（与 HTTP 共用判定）', async () => {
+  const up = await fakeUpstream();
+  const { proxy, home } = await thirdChannelFixture({ upstream: { host: '127.0.0.1', port: up.port } });
+  const upgrade = (hostHeader) => new Promise((resolve, reject) => {
+    const sock = connect(proxy.port, '127.0.0.1', () => {
+      sock.write(
+        `GET /api/events.mux HTTP/1.1\r\nHost: ${hostHeader}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`
+        + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
+      );
+    });
+    let buf = '';
+    sock.on('data', (c) => { buf += c.toString('utf8'); });
+    sock.on('close', () => resolve(buf.split('\r\n')[0] ?? ''));
+    sock.on('error', reject);
+    setTimeout(() => sock.destroy(), 500);
+  });
+  try {
+    assert.match(await upgrade('evil.example.com'), /403/, '陌生公网 Host 的 WS 握手被拒');
+    assert.match(await upgrade(PUBLIC_HOST), /401/, '固定域名但未认证 → 401（不是 403，说明判定确实按通道分流）');
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('免认证白名单：manifest / SW / 图标 / 注入脚本在未登录时 200，且不重定向登录页', async () => {
+  const up = await fakeUpstream();
+  const proxy = await createPocketProxy({
+    port: 0,
+    host: '127.0.0.1',
+    upstream: { host: '127.0.0.1', port: up.port },
+    heartbeat: false,
+    auth: { sessionKey: 'sk', getToken: () => PIN, isProtected: () => true },
+  });
+  try {
+    for (const path of ['/pocket.webmanifest', '/pocket-sw.js', '/pocket-icon-192.png', '/pocket-icon-512.png', '/pocket-icon-maskable-512.png', '/pocket-badge.png', POCKET_PWA_JS_PATH]) {
+      const res = await getPathWithHost(proxy.port, 'pocket.example.com', path);
+      assert.equal(res.status, 200, `${path} 未登录也必须 200（否则 PWA 装不上）`);
+      assert.ok(!/访问验证/.test(res.body), `${path} 不能拿到登录页`);
+    }
+    const manifest = await getPathWithHost(proxy.port, 'pocket.example.com', '/pocket.webmanifest');
+    assert.match(String(manifest.headers['content-type']), /application\/manifest\+json/);
+    assert.equal(JSON.parse(manifest.body).start_url, '/');
+    const sw = await getPathWithHost(proxy.port, 'pocket.example.com', '/pocket-sw.js');
+    assert.match(String(sw.headers['content-type']), /text\/javascript/);
+    assert.equal(sw.headers['service-worker-allowed'], '/');
+    assert.match(sw.body, /addEventListener\('push'/);
+    const icon = await getPathWithHost(proxy.port, 'pocket.example.com', '/pocket-icon-192.png');
+    assert.equal(icon.headers['content-type'], 'image/png');
+    assert.equal(icon.raw.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', '真实 PNG 头');
+    const pwa = await getPathWithHost(proxy.port, 'pocket.example.com', POCKET_PWA_JS_PATH);
+    assert.match(pwa.body, /dshPocketPush/, '注入脚本暴露推送 API');
+    assert.match(pwa.body, /dshPocketPasskey/, '注入脚本暴露通行密钥 API');
+    assert.match(pwa.body, /\/pocket-sw\.js/, '注册真实 SW 路径（PWA_PATHS 单一来源）');
+    // HEAD 也要 200（浏览器/SW 会发 HEAD）
+    const head = await getPathWithHost(proxy.port, 'pocket.example.com', '/pocket.webmanifest', {}, 'HEAD');
+    assert.equal(head.status, 200);
+    assert.equal(head.body, '', 'HEAD 无响应体');
+    // 敏感端点仍要认证
+    const vapid = await getPathWithHost(proxy.port, 'pocket.example.com', PUSH_PATHS.vapid, { accept: 'application/json' });
+    assert.equal(vapid.status, 401, 'GET /pocket-push/vapid 需要会话');
+    const sub = await postJsonWithHost(proxy.port, PUBLIC_HOST, PUSH_PATHS.subscribe, { subscription: pushSubscription() });
+    assert.equal(sub.status, 401, 'POST /pocket-push-subscribe 需要会话');
+    const begin = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.registerBegin, {});
+    assert.equal(begin.status, 401, '注册通行密钥需要已登录 PIN 会话');
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+  }
+});
+
+test('HTML 注入：manifest 链接 + apple-touch-icon + /pocket-pwa.js，并在固定域名通道给出通行密钥配置', async () => {
+  const up = await fakeUpstreamHtml();
+  const { proxy, home } = await thirdChannelFixture({ upstream: { host: '127.0.0.1', port: up.port } });
+  try {
+    const session = await loginWithPin(proxy.port, PUBLIC_HOST, PIN);
+    assert.equal(session.status, 302, 'PIN 登录成功');
+    const page = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html', cookie: session.session });
+    assert.equal(page.status, 200);
+    assert.match(page.body, /<link rel="manifest" href="\/pocket\.webmanifest">/);
+    assert.match(page.body, /<link rel="apple-touch-icon" href="\/pocket-icon-192\.png">/);
+    assert.match(page.body, /<script src="\/pocket-pwa\.js" defer><\/script>/);
+    assert.match(page.body, /data-dsh-pocket-pwa="1"/, '注入标记（判重用）');
+    const cfg = /__DSH_POCKET_CFG__=(\{.*?\});/.exec(page.body);
+    assert.ok(cfg, '注入配置存在');
+    assert.equal(JSON.parse(cfg[1]).passkey, true, '固定域名通道 + 开关打开 → 允许通行密钥');
+    assert.equal(JSON.parse(cfg[1]).channel, 'named');
+
+    // 局域网入口（非公网通道）不显示通行密钥按钮/配置
+    const lan = await getPathWithHost(proxy.port, '127.0.0.1', '/', { accept: 'text/html', cookie: session.session });
+    assert.equal(JSON.parse(/__DSH_POCKET_CFG__=(\{.*?\});/.exec(lan.body)[1]).passkey, false, '局域网 IP 不能当 rpId');
+    // 登录页在可用时给出「用通行密钥登录」入口
+    const loginPage = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html' });
+    assert.match(loginPage.body, /用通行密钥登录/, '登录页有通行密钥按钮');
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('通行密钥完整链路：PIN 会话 → register/begin+finish → 设备 Cookie 免 PIN → login 续期', async () => {
+  const up = await fakeUpstream();
+  const { proxy, store, home } = await thirdChannelFixture({ upstream: { host: '127.0.0.1', port: up.port } });
+  const authr = softwareAuthenticator();
+  try {
+    const rpId = PUBLIC_HOST;
+    const origin = `https://${PUBLIC_HOST}`;
+    // 1) 先拿 PIN 会话（注册必须已登录）
+    const { session } = await loginWithPin(proxy.port, PUBLIC_HOST, PIN);
+    assert.ok(session, '拿到 PIN 会话 cookie');
+
+    // 2) begin
+    const begin = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.registerBegin, {}, { cookie: session });
+    assert.equal(begin.status, 200);
+    assert.ok(begin.json.flowId, '返回一次性 flowId');
+    assert.equal(begin.json.rp.id, rpId, 'rpId 来自 Host');
+    assert.deepEqual(begin.json.pubKeyCredParams, [{ type: 'public-key', alg: -7 }], '只声明 ES256');
+    assert.equal(begin.json.attestation, 'none');
+
+    // 3) 用软件认证器造注册响应
+    const credentialIdBuf = randomBytes(16);
+    const credentialId = credentialIdBuf.toString('base64url');
+    const registration = authr.register({ rpId, challenge: begin.json.challenge, origin, credentialId: credentialIdBuf });
+    const finish = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.registerFinish, {
+      flowId: begin.json.flowId, ...registration, name: '我的手机',
+    }, { cookie: session });
+    assert.equal(finish.status, 200, `注册完成：${finish.body}`);
+    assert.equal(finish.json.ok, true);
+    assert.equal(finish.json.device.id, credentialId);
+    assert.equal(finish.json.device.name, '我的手机');
+    const deviceCookie = (finish.headers['set-cookie'] ?? []).find((c) => c.startsWith(`${DEVICE_COOKIE}=`));
+    assert.ok(deviceCookie, '签发长期设备 cookie');
+    assert.match(deviceCookie, /HttpOnly/, '设备令牌只能走 cookie');
+    assert.match(deviceCookie, /SameSite=Lax/);
+    assert.match(deviceCookie, /Max-Age=15552000/, '180 天');
+    // 公网域名走 https（无 X-Forwarded-Proto 时的默认）→ 设备 cookie 必须带 Secure
+    assert.match(deviceCookie, /; Secure/, 'HTTPS 上下文加 Secure');
+    assert.equal(store.list().length, 1, '凭据入库');
+    assert.equal(store.list()[0].name, '我的手机');
+
+    // 4) 只有设备 cookie（没有 PIN 会话）→ 直接放行：这就是「不用等电脑批准」
+    const deviceOnly = deviceCookie.split(';')[0];
+    const direct = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html', cookie: deviceOnly });
+    assert.equal(direct.status, 200, '设备 cookie 命中 → 免 PIN 放行');
+    assert.ok(up.seen.length >= 1, '请求真的透传到了上游');
+
+    // 5) flowId 一次性：重复提交同一个 begin 结果 → 400
+    const replay = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.registerFinish, {
+      flowId: begin.json.flowId, ...registration,
+    }, { cookie: session });
+    assert.equal(replay.status, 400, '挑战值一次用完即焚');
+    assert.match(replay.body, /过期|expired/);
+
+    // 6) login/begin 不需要任何会话（免 PIN 一键登录）
+    const loginBegin = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.loginBegin, {});
+    assert.equal(loginBegin.status, 200);
+    assert.equal(loginBegin.json.rpId, rpId);
+    assert.deepEqual(loginBegin.json.allowCredentials, [], '空 allowCredentials：支持可发现凭据');
+
+    // 7) 断言签名（计数器 1 > 0）→ 会话 cookie + 设备 cookie 续期
+    const assertion = authr.assert({ rpId, challenge: loginBegin.json.challenge, origin, credentialId, signCount: 1 });
+    const loginFinish = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.loginFinish, {
+      flowId: loginBegin.json.flowId, ...assertion,
+    });
+    assert.equal(loginFinish.status, 200, `登录完成：${loginFinish.body}`);
+    const cookies = loginFinish.headers['set-cookie'] ?? [];
+    assert.ok(cookies.some((c) => c.startsWith(`dsh_pocket_token=`)), '种下与 PIN 登录等价的会话 cookie');
+    assert.ok(cookies.some((c) => c.startsWith(`${DEVICE_COOKIE}=`)), '设备 cookie 续期');
+    const withSession = cookies.find((c) => c.startsWith('dsh_pocket_token=')).split(';')[0];
+    const after = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html', cookie: withSession });
+    assert.equal(after.status, 200, '通行密钥登录后的会话可直接访问');
+
+    // 8) 未知凭据 → 401（前端回落到 PIN 页）
+    const unknownBegin = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.loginBegin, {});
+    const unknown = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.loginFinish, {
+      flowId: unknownBegin.json.flowId,
+      id: randomBytes(16).toString('base64url'),
+      rawId: randomBytes(16).toString('base64url'),
+      response: {},
+    });
+    assert.equal(unknown.status, 401, '未注册设备 → 401');
+
+    // 9) 签名不对 → 400（挑战值仍一次性作废）
+    const badBegin = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.loginBegin, {});
+    const badAssertion = authr.assert({ rpId, challenge: badBegin.json.challenge, origin, credentialId, signCount: 2 });
+    badAssertion.response.signature = b64u(randomBytes(64));
+    const bad = await postJsonWithHost(proxy.port, PUBLIC_HOST, PASSKEY_PATHS.loginFinish, {
+      flowId: badBegin.json.flowId, ...badAssertion,
+    });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body, /ERR_SIGNATURE/, '错误码透出（便于排查）');
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('通行密钥守卫：开关关闭 / 快网关掉 / 随机域名通道 / 崩溃后的设备令牌都不放行', async () => {
+  const up = await fakeUpstream();
+  const lite = await thirdChannelFixture({ upstream: { host: '127.0.0.1', port: up.port }, passkey: false });
+  try {
+    // 1) 开关关闭：注册与登录端点都拒绝，登录页也不显示按钮
+    const begin = await postJsonWithHost(lite.proxy.port, PUBLIC_HOST, PASSKEY_PATHS.loginBegin, {});
+    assert.equal(begin.status, 400);
+    assert.match(begin.body, /未启用|disabled/);
+    const page = await getPathWithHost(lite.proxy.port, PUBLIC_HOST, '/', { accept: 'text/html' });
+    assert.ok(!page.body.includes('用通行密钥登录'), '开关关闭 → 不显示入口');
+  } finally {
+    await lite.proxy.close();
+  }
+  // 2) 随机域名通道（quick）：不提供通行密钥（rpId 会随域名失效）
+  const quick = await thirdChannelFixture({
+    upstream: { host: '127.0.0.1', port: up.port },
+    channels: { mode: 'quick', quick: 'abc-123.trycloudflare.com', named: '', ssh: '' },
+  });
+  try {
+    const begin = await postJsonWithHost(quick.proxy.port, 'abc-123.trycloudflare.com', PASSKEY_PATHS.loginBegin, {});
+    assert.equal(begin.status, 400);
+    assert.match(begin.body, /固定域名/, '明确说明只支持固定域名通道');
+    const { session } = await loginWithPin(quick.proxy.port, 'abc-123.trycloudflare.com', PIN);
+    const reg = await postJsonWithHost(quick.proxy.port, 'abc-123.trycloudflare.com', PASSKEY_PATHS.registerBegin, {}, { cookie: session });
+    assert.equal(reg.status, 400);
+    const page = await getPathWithHost(quick.proxy.port, 'abc-123.trycloudflare.com', '/', { accept: 'text/html' });
+    assert.ok(!page.body.includes('用通行密钥登录'), 'quick 模式登录页不显示通行密钥按钮');
+  } finally {
+    await quick.proxy.close();
+    await new Promise((r) => up.server.close(r));
+    rmSync(lite.home, { recursive: true, force: true });
+    rmSync(quick.home, { recursive: true, force: true });
+  }
+});
+
+test('设备 Cookie 防线：伪造/已撤销/过期令牌一律回到 PIN 闸门，且撤销立即生效', async () => {
+  const up = await fakeUpstream();
+  const { proxy, store, home } = await thirdChannelFixture({ upstream: { host: '127.0.0.1', port: up.port } });
+  try {
+    // 1) 伪造 cookie
+    const fake = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html', cookie: `${DEVICE_COOKIE}=not-a-real-token` });
+    assert.equal(fake.status, 200);
+    assert.match(fake.body, /访问验证/, '伪造令牌回到登录页');
+
+    // 2) 真令牌（直接向 store 要一个，等价于注册成功后的 cookie）
+    const issued = store.issueDeviceToken({ deviceId: 'dev-1', name: 'dev' });
+    const cookie = `${DEVICE_COOKIE}=${issued.token}`;
+    const ok = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html', cookie });
+    assert.equal(ok.status, 200);
+    assert.ok(!/访问验证/.test(ok.body), '有效令牌免 PIN');
+
+    // 3) 撤销后立即失效（store 每次请求都读盘，所以不存在缓存窗口）
+    store.revokeDevice('dev-1');
+    const revoked = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html', cookie });
+    assert.equal(revoked.status, 200);
+    assert.match(revoked.body, /访问验证/, '撤销立即生效');
+
+    // 4) 过期令牌（ttlMs 极小）不认
+    const expired = store.issueDeviceToken({ deviceId: 'dev-2', name: 'dev2', ttlMs: 1 });
+    await new Promise((r) => setTimeout(r, 10));
+    const stale = await getPathWithHost(proxy.port, PUBLIC_HOST, '/', { accept: 'text/html', cookie: `${DEVICE_COOKIE}=${expired.token}` });
+    assert.match(stale.body, /访问验证/, '过期令牌不认');
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('推送端点：vapid 公钥 / 订阅 / 退订（需认证；订阅写入注入的 pushStore）', async () => {
+  const up = await fakeUpstream();
+  const home = mkdtempSync(join(tmpdir(), 'dshp-proxy-push-'));
+  const pushStore = createPushStore({ home, log: () => {} });
+  const { proxy } = await thirdChannelFixture({ upstream: { host: '127.0.0.1', port: up.port }, pushStore });
+  try {
+    const { session } = await loginWithPin(proxy.port, PUBLIC_HOST, PIN);
+    const vapid = await getPathWithHost(proxy.port, PUBLIC_HOST, PUSH_PATHS.vapid, { cookie: session, accept: 'application/json' });
+    assert.equal(vapid.status, 200);
+    const publicKey = vapid.json.publicKey;
+    assert.equal(Buffer.from(publicKey, 'base64url').length, 65, '65 字节未压缩 P-256 公钥');
+    assert.ok(!vapid.body.includes('privateKey'), '响应里没有私钥字段');
+
+    const sub = pushSubscription();
+    const saved = await postJsonWithHost(proxy.port, PUBLIC_HOST, PUSH_PATHS.subscribe, sub, { cookie: session });
+    assert.equal(saved.status, 200, saved.body);
+    assert.equal(saved.json.ok, true);
+    assert.equal(saved.json.count, 1);
+    assert.equal(pushStore.count(), 1, '订阅写进了 store');
+    // SW 的 pushsubscriptionchange 形态：{ subscription, reason }
+    const second = pushSubscription();
+    const swSaved = await postJsonWithHost(proxy.port, PUBLIC_HOST, PUSH_PATHS.subscribe, { subscription: second, reason: 'pushsubscriptionchange' }, { cookie: session });
+    assert.equal(swSaved.json.count, 2);
+    assert.equal(String(pushStore.list()[0].ua), '', '未带 UA 时留空');
+
+    const removed = await postJsonWithHost(proxy.port, PUBLIC_HOST, PUSH_PATHS.unsubscribe, { endpoint: sub.endpoint }, { cookie: session });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.json.removed, true);
+    assert.equal(pushStore.count(), 1);
+
+    // 非法订阅 → 400，且只回 { error }
+    const bad = await postJsonWithHost(proxy.port, PUBLIC_HOST, PUSH_PATHS.subscribe, { endpoint: 'http://x', keys: {} }, { cookie: session });
+    assert.equal(bad.status, 400);
+    assert.ok(bad.json.error);
+    assert.ok(!('stack' in bad.json), '不泄露内部细节');
+
+    // 请求体超过 64KB → 413
+    const huge = await postJsonWithHost(proxy.port, PUBLIC_HOST, PUSH_PATHS.subscribe, { subscription: { endpoint: `https://x.example.com/${'a'.repeat(70 * 1024)}` } }, { cookie: session });
+    assert.equal(huge.status, 413, '请求体上限 64KB');
+  } finally {
+    await proxy.close();
+    await new Promise((r) => up.server.close(r));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
