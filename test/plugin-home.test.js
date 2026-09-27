@@ -366,7 +366,7 @@ function textOf(node) {
 }
 
 /** 挂载打包产物里的设置页组件（真实组件代码 → 真实渲染树 + 可点的按钮）。 */
-async function mountSettingsTab({ status, push = null, rpc = () => ({}) }) {
+async function mountSettingsTab({ status, push = null, passkey = null, rpc = () => ({}) }) {
   const rpcCalls = [];
   const store = new Map();
   const storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k) };
@@ -381,6 +381,7 @@ async function mountSettingsTab({ status, push = null, rpc = () => ({}) }) {
     addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
     isSecureContext: true, PublicKeyCredential: function PublicKeyCredential() {},
     dshPocketPush: push,
+    dshPocketPasskey: passkey,
   };
   const react = createReactStub();
   // 定时器全部换成不落地的桩：组件里的轮询/Toast 定时器不需要真的跑，
@@ -712,6 +713,36 @@ test('设置页：选中 SSH 但主机/用户名没填 → 启动被明确阻止
   assert.ok(!tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.tunnelStart), '配置不全时绝不能发起隧道');
   assert.ok(!tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.sshSetConfig), '配置不全时也不该落盘');
   assert.ok(tab.texts().includes(POCKET_ZH.sshNeedCfg), '应明确提示「请先填写 SSH 主机与用户名」');
+});
+
+test('设置页：通行密钥注册入口常驻（登录后的横幅被关掉也能注册）', async () => {
+  // 没有注入 dshPocketPasskey：点击给出明确原因，而不是静默失败
+  const noApi = await mountSettingsTab({ status: FULL_STATUS, rpc: fullRpc });
+  await noApi.settle();
+  assert.equal(noApi.buttons(POCKET_ZH.passkeyRegisterBtn).length, 1, '设置页应有「在此设备注册」按钮');
+  await noApi.click(POCKET_ZH.passkeyRegisterBtn);
+  assert.ok(noApi.texts().includes(POCKET_ZH.passkeyRegisterUnavailable), '缺少注入接口时应说明原因');
+
+  // 有注入接口：成功路径 → 带上设备名、提示已注册、刷新设备列表
+  const calls = [];
+  const okTab = await mountSettingsTab({
+    status: FULL_STATUS, rpc: fullRpc,
+    passkey: { register: async (name) => { calls.push(name); return { ok: true, device: { id: 'new-dev' } }; } },
+  });
+  await okTab.settle();
+  await okTab.click(POCKET_ZH.passkeyRegisterBtn);
+  assert.deepEqual(calls, [POCKET_ZH.passkeyThisDevice], '注册时应带上设备名');
+  assert.ok(okTab.texts().includes(POCKET_ZH.passkeyRegistered), '成功应提示已注册');
+  assert.ok(okTab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.passkeyList), '成功应刷新设备列表');
+
+  // 失败路径：错误原因透出（用户取消 / 非 HTTPS 等）
+  const badTab = await mountSettingsTab({
+    status: FULL_STATUS, rpc: fullRpc,
+    passkey: { register: async () => ({ ok: false, error: { message: '用户取消 | cancelled' } }) },
+  });
+  await badTab.settle();
+  await badTab.click(POCKET_ZH.passkeyRegisterBtn);
+  assert.ok(badTab.texts().includes('用户取消'), '失败原因应显示出来');
 });
 
 

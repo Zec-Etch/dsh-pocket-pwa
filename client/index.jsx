@@ -779,10 +779,15 @@ function PocketSettingsTab({ rpcCall, t }) {
     ? notifyStatusData.lastResults
     : (Array.isArray(notifyStatusData?.results) ? notifyStatusData.results : []);
   const notifyLastResult = notifyResults.length ? notifyResults[notifyResults.length - 1] : null;
+  // 推送不可用时的具体原因：非安全上下文（http + 非 localhost）最常见，不能一律说"浏览器不支持"
+  const pushUnavailableText = () => {
+    if (typeof window !== 'undefined' && window.isSecureContext === false) return t('notifyPushInsecure');
+    return t('notifyPushUnsupported');
+  };
   // 订阅/取消必须在用户手势里直接调用 window.dshPocketPush（浏览器要求）
   const subscribePush = async () => {
     const api = pushApi();
-    if (typeof api?.subscribe !== 'function') { showToast(t('notifyPushUnsupported')); return; }
+    if (typeof api?.subscribe !== 'function') { showToast(pushUnavailableText()); return; }
     setNotifyBusy(true);
     try {
       const r = await api.subscribe();
@@ -797,7 +802,7 @@ function PocketSettingsTab({ rpcCall, t }) {
   };
   const unsubscribePush = async () => {
     const api = pushApi();
-    if (typeof api?.unsubscribe !== 'function') { showToast(t('notifyPushUnsupported')); return; }
+    if (typeof api?.unsubscribe !== 'function') { showToast(pushUnavailableText()); return; }
     setNotifyBusy(true);
     try {
       const r = await api.unsubscribe();
@@ -862,8 +867,35 @@ function PocketSettingsTab({ rpcCall, t }) {
   const [renameVal, setRenameVal] = useState('');
   const [revokeId, setRevokeId] = useState(null);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [regBusy, setRegBusy] = useState(false); // 本机注册通行密钥（浏览器 WebAuthn 手势）
+  const [regMsg, setRegMsg] = useState(null); // { ok, text }
   const passkeyView = status?.passkey ?? null; // null = 旧宿主不返回该字段
   const webAuthn = detectWebAuthn();
+
+  // 在本设备注册通行密钥：调用宿主注入脚本暴露的 window.dshPocketPasskey.register()。
+  // 入口放在设置页里（登录后的横幅可能被关掉，用户就再也找不到注册入口了）。
+  const registerThisDevice = async () => {
+    const api = typeof window !== 'undefined' ? window.dshPocketPasskey : null;
+    if (typeof api?.register !== 'function') {
+      setRegMsg({ ok: false, text: t('passkeyRegisterUnavailable') });
+      return;
+    }
+    setRegBusy(true);
+    setRegMsg(null);
+    try {
+      const r = await api.register(t('passkeyThisDevice'));
+      if (r?.ok) {
+        setRegMsg({ ok: true, text: t('passkeyRegistered') });
+        loadDevices();
+      } else {
+        setRegMsg({ ok: false, text: errText(r?.error?.message ?? r?.error) || t('unknownError') });
+      }
+    } catch (err) {
+      setRegMsg({ ok: false, text: errText(err?.message) || t('unknownError') });
+    } finally {
+      setRegBusy(false);
+    }
+  };
 
   const loadDevices = async () => {
     try {
@@ -1164,7 +1196,7 @@ function PocketSettingsTab({ rpcCall, t }) {
                 h('button', { style: styles.smallBtn, onClick: unsubscribePush, disabled: notifyBusy }, t('notifyUnsubscribe')),
               ),
               h('div', null,
-                !pushApiReady ? h('div', { style: { ...styles.muted, marginTop: 4 } }, t('notifyPushUnsupported')) : null,
+                !pushApiReady ? h('div', { style: { ...styles.muted, marginTop: 4 } }, pushUnavailableText()) : null,
                 // 有订阅时才给「清空全部订阅」（手机换浏览器/清数据后的残留订阅）
                 (notifyView.subscriptionCount ?? 0) > 0 ? h('div', { style: { marginTop: 6 } },
                   clearSubsAsk
@@ -1223,6 +1255,13 @@ function PocketSettingsTab({ rpcCall, t }) {
             // 三态说明：非安全上下文 → 浏览器不支持 → 可用
             h('div', { style: { marginTop: 6, fontSize: 12, lineHeight: 1.5, color: (!webAuthn.secure || !webAuthn.supported) ? COLOR_ERR : 'var(--dsw-alias-label-tertiary,#8b93a1)' } },
               !webAuthn.secure ? t('passkeyInsecure') : (!webAuthn.supported ? t('passkeyUnsupported') : t('passkeySecureHint'))),
+            // 在本设备注册通行密钥：入口常驻设置页（登录后的提示横幅可被关闭，关掉就找不到了）
+            (webAuthn.secure && webAuthn.supported && passkeyView.enabled === true)
+              ? row(t('passkeyRegister'),
+                h('button', { style: styles.smallBtn, onClick: registerThisDevice, disabled: regBusy },
+                  regBusy ? t('passkeyRegistering') : t('passkeyRegisterBtn')),
+                regMsg ? h('div', { style: { marginTop: 4, fontSize: 12, lineHeight: 1.5, wordBreak: 'break-word', color: regMsg.ok ? COLOR_OK : COLOR_ERR } }, regMsg.text) : null)
+              : null,
             row(t('passkeyRpId'),
               h('span', { style: { fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 12, wordBreak: 'break-all' } },
                 passkeyView.rpId || (typeof location !== 'undefined' ? location.hostname : '—'))),

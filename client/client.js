@@ -2133,6 +2133,7 @@ var zh2 = {
   "notifySubscribeFailed": "\u274C \u8BA2\u9605\u5931\u8D25\uFF1A{err}",
   "notifyUnsubscribeFailed": "\u274C \u53D6\u6D88\u5931\u8D25\uFF1A{err}",
   "notifyPushUnsupported": "\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 Web Push\uFF1AiOS \u9700\u5148\u300C\u5B89\u88C5\u5230\u4E3B\u5C4F\u300D\u518D\u4ECE\u4E3B\u5C4F\u6253\u5F00\uFF1B\u684C\u9762\u7AEF\u7528 Chrome/Edge/Firefox",
+  "notifyPushInsecure": "\u5F53\u524D\u4E0D\u662F\u5B89\u5168\u4E0A\u4E0B\u6587\uFF08http \u4E14\u975E localhost\uFF09\uFF1A\u6D4F\u89C8\u5668\u5728\u8FD9\u91CC\u4E0D\u63D0\u4F9B Service Worker \u4E0E\u63A8\u9001\u8BA2\u9605\u3002\u8BF7\u6539\u7528 HTTPS \u57DF\u540D\uFF08\u81EA\u6709 VPS/Caddy \u6216 Cloudflare \u56FA\u5B9A\u57DF\u540D\uFF09\uFF0C\u6216\u5728\u672C\u673A\u7528 http://127.0.0.1:\u7AEF\u53E3 \u6253\u5F00\u3002",
   "notifyTest": "\u53D1\u9001\u6D4B\u8BD5\u901A\u77E5",
   "notifyTesting": "\u53D1\u9001\u4E2D\u2026",
   "notifyTestSent": "\u2705 \u5DF2\u53D1\u51FA\u6D4B\u8BD5\u901A\u77E5\uFF08\u6CA1\u6536\u5230\u5C31\u770B\u4E0B\u65B9\u300C\u6700\u8FD1\u63A8\u9001\u300D\uFF09",
@@ -2181,8 +2182,14 @@ var zh2 = {
   "passkeyDeviceCount": "\u5DF2\u6CE8\u518C\u8BBE\u5907\uFF1A{n} \u53F0",
   "passkeyUnsupported": "\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u901A\u884C\u5BC6\u94A5\uFF08WebAuthn\uFF09\uFF0C\u4E0D\u80FD\u6CE8\u518C\uFF1B\u8BF7\u6539\u7528\u8F83\u65B0\u7684 Chrome/Edge/Safari",
   "passkeyInsecure": "\u5F53\u524D\u4E0D\u662F HTTPS \u5B89\u5168\u73AF\u5883\uFF1A\u6D4F\u89C8\u5668\u53EA\u5141\u8BB8\u5728 HTTPS \u9875\u9762\u6CE8\u518C/\u4F7F\u7528\u901A\u884C\u5BC6\u94A5\uFF08\u5C40\u57DF\u7F51 http \u4E0B\u4E0D\u53EF\u7528\uFF09",
-  "passkeySecureHint": "\u6CE8\u518C\u65F6\u624B\u673A\u4F1A\u8981\u6C42\u6307\u7EB9/\u9762\u5BB9\u9A8C\u8BC1\uFF1B\u8BBE\u5907\u53EA\u80FD\u5728\u672C\u673A\u64A4\u9500",
+  "passkeySecureHint": "\u6CE8\u518C\u65F6\u6D4F\u89C8\u5668\u4F1A\u8981\u6C42\u6307\u7EB9/\u9762\u5BB9/\u7CFB\u7EDF PIN \u9A8C\u8BC1\uFF1B\u5DF2\u6CE8\u518C\u8BBE\u5907\u53EF\u5728\u4EFB\u4F55\u5DF2\u767B\u5F55\u7684\u8BBE\u7F6E\u9875\u64A4\u9500",
   "passkeyDevices": "\u8BBE\u5907\u5217\u8868",
+  "passkeyRegister": "\u672C\u8BBE\u5907\u6CE8\u518C\u901A\u884C\u5BC6\u94A5",
+  "passkeyRegisterBtn": "\u5728\u6B64\u8BBE\u5907\u6CE8\u518C",
+  "passkeyRegistering": "\u6CE8\u518C\u4E2D\u2026\uFF08\u8BF7\u5728\u6D4F\u89C8\u5668\u91CC\u5B8C\u6210\u9A8C\u8BC1\uFF09",
+  "passkeyRegistered": "\u5DF2\u5728\u672C\u8BBE\u5907\u6CE8\u518C\u901A\u884C\u5BC6\u94A5\uFF0C\u4E0B\u6B21\u53EF\u76F4\u63A5\u7528\u5B83\u767B\u5F55",
+  "passkeyRegisterUnavailable": "\u5BBF\u4E3B\u672A\u6CE8\u5165\u901A\u884C\u5BC6\u94A5\u63A5\u53E3\uFF08\u9700\u8981 HTTPS + \u56FA\u5B9A\u57DF\u540D\u8BBF\u95EE\uFF09",
+  "passkeyThisDevice": "\u672C\u673A\u6D4F\u89C8\u5668",
   "passkeyNoDevices": "\u8FD8\u6CA1\u6709\u6CE8\u518C\u8BBE\u5907",
   "passkeyColCreated": "\u6CE8\u518C\u65F6\u95F4",
   "passkeyColLastLogin": "\u6700\u540E\u767B\u5F55",
@@ -2351,6 +2358,7 @@ var en2 = {
   "notifySubscribeFailed": "\u274C Subscribe failed: {err}",
   "notifyUnsubscribeFailed": "\u274C Unsubscribe failed: {err}",
   "notifyPushUnsupported": "This browser has no Web Push: on iOS install to the home screen and open it from there; on desktop use Chrome/Edge/Firefox",
+  "notifyPushInsecure": "Not a secure context (http on a non-localhost host): browsers expose no Service Worker or push subscription here. Use an HTTPS domain (your VPS/Caddy or a Cloudflare fixed domain), or open http://127.0.0.1:port on this machine.",
   "notifyTest": "Send a test notification",
   "notifyTesting": "Sending\u2026",
   "notifyTestSent": "\u2705 Test notification sent (if it did not arrive, see \u201CLast push\u201D below)",
@@ -2399,8 +2407,14 @@ var en2 = {
   "passkeyDeviceCount": "Registered devices: {n}",
   "passkeyUnsupported": "This browser has no WebAuthn support, so passkeys cannot be registered; use a recent Chrome/Edge/Safari",
   "passkeyInsecure": "This is not a secure context: browsers only allow passkey registration on HTTPS pages (unusable over plain-http LAN)",
-  "passkeySecureHint": "Registration asks for fingerprint/face on the phone; devices can only be revoked on this computer",
+  "passkeySecureHint": "Registration asks for fingerprint/face/system PIN; registered devices can be revoked from any signed-in settings page",
   "passkeyDevices": "Devices",
+  "passkeyRegister": "Passkey on this device",
+  "passkeyRegisterBtn": "Register on this device",
+  "passkeyRegistering": "Registering\u2026 (complete the prompt in your browser)",
+  "passkeyRegistered": "Passkey registered on this device \u2014 use it to sign in next time",
+  "passkeyRegisterUnavailable": "The host did not inject the passkey API (needs HTTPS on a fixed domain)",
+  "passkeyThisDevice": "This browser",
   "passkeyNoDevices": "No registered devices yet",
   "passkeyColCreated": "Registered",
   "passkeyColLastLogin": "Last sign-in",
@@ -3177,10 +3191,14 @@ function PocketSettingsTab({ rpcCall, t }) {
   const resultText = (r) => `${resultChannel(r)} \xB7 ${r?.ok === true ? t("notifyResultOk") : fmt(t, "notifyResultFail", { err: errText(r?.error) || `HTTP ${r?.status ?? "\u2014"}` })}`;
   const notifyResults = Array.isArray(notifyStatusData?.lastResults) ? notifyStatusData.lastResults : Array.isArray(notifyStatusData?.results) ? notifyStatusData.results : [];
   const notifyLastResult = notifyResults.length ? notifyResults[notifyResults.length - 1] : null;
+  const pushUnavailableText = () => {
+    if (typeof window !== "undefined" && window.isSecureContext === false) return t("notifyPushInsecure");
+    return t("notifyPushUnsupported");
+  };
   const subscribePush = async () => {
     const api = pushApi();
     if (typeof api?.subscribe !== "function") {
-      showToast(t("notifyPushUnsupported"));
+      showToast(pushUnavailableText());
       return;
     }
     setNotifyBusy(true);
@@ -3198,7 +3216,7 @@ function PocketSettingsTab({ rpcCall, t }) {
   const unsubscribePush = async () => {
     const api = pushApi();
     if (typeof api?.unsubscribe !== "function") {
-      showToast(t("notifyPushUnsupported"));
+      showToast(pushUnavailableText());
       return;
     }
     setNotifyBusy(true);
@@ -3264,8 +3282,32 @@ function PocketSettingsTab({ rpcCall, t }) {
   const [renameVal, setRenameVal] = (0, import_react2.useState)("");
   const [revokeId, setRevokeId] = (0, import_react2.useState)(null);
   const [passkeyBusy, setPasskeyBusy] = (0, import_react2.useState)(false);
+  const [regBusy, setRegBusy] = (0, import_react2.useState)(false);
+  const [regMsg, setRegMsg] = (0, import_react2.useState)(null);
   const passkeyView = status?.passkey ?? null;
   const webAuthn = detectWebAuthn();
+  const registerThisDevice = async () => {
+    const api = typeof window !== "undefined" ? window.dshPocketPasskey : null;
+    if (typeof api?.register !== "function") {
+      setRegMsg({ ok: false, text: t("passkeyRegisterUnavailable") });
+      return;
+    }
+    setRegBusy(true);
+    setRegMsg(null);
+    try {
+      const r = await api.register(t("passkeyThisDevice"));
+      if (r?.ok) {
+        setRegMsg({ ok: true, text: t("passkeyRegistered") });
+        loadDevices();
+      } else {
+        setRegMsg({ ok: false, text: errText(r?.error?.message ?? r?.error) || t("unknownError") });
+      }
+    } catch (err) {
+      setRegMsg({ ok: false, text: errText(err?.message) || t("unknownError") });
+    } finally {
+      setRegBusy(false);
+    }
+  };
   const loadDevices = async () => {
     try {
       const r = await call(POCKET_ENDPOINTS.passkeyList, {});
@@ -3621,7 +3663,7 @@ function PocketSettingsTab({ rpcCall, t }) {
           (0, import_react2.createElement)(
             "div",
             null,
-            !pushApiReady ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("notifyPushUnsupported")) : null,
+            !pushApiReady ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, pushUnavailableText()) : null,
             // 有订阅时才给「清空全部订阅」（手机换浏览器/清数据后的残留订阅）
             (notifyView.subscriptionCount ?? 0) > 0 ? (0, import_react2.createElement)(
               "div",
@@ -3715,6 +3757,16 @@ function PocketSettingsTab({ rpcCall, t }) {
           { style: { marginTop: 6, fontSize: 12, lineHeight: 1.5, color: !webAuthn.secure || !webAuthn.supported ? COLOR_ERR : "var(--dsw-alias-label-tertiary,#8b93a1)" } },
           !webAuthn.secure ? t("passkeyInsecure") : !webAuthn.supported ? t("passkeyUnsupported") : t("passkeySecureHint")
         ),
+        // 在本设备注册通行密钥：入口常驻设置页（登录后的提示横幅可被关闭，关掉就找不到了）
+        webAuthn.secure && webAuthn.supported && passkeyView.enabled === true ? row(
+          t("passkeyRegister"),
+          (0, import_react2.createElement)(
+            "button",
+            { style: styles.smallBtn, onClick: registerThisDevice, disabled: regBusy },
+            regBusy ? t("passkeyRegistering") : t("passkeyRegisterBtn")
+          ),
+          regMsg ? (0, import_react2.createElement)("div", { style: { marginTop: 4, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word", color: regMsg.ok ? COLOR_OK : COLOR_ERR } }, regMsg.text) : null
+        ) : null,
         row(
           t("passkeyRpId"),
           (0, import_react2.createElement)(
