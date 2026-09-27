@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
-import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, sign as cryptoSign } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,6 +78,18 @@ function softwareAuthenticator() {
         rawId: b64u(credentialId),
         type: 'public-key',
         response: { clientDataJSON: b64u(clientData), attestationObject: b64u(attestation) },
+      };
+    },
+    /** 断言（登录）：对 authData || sha256(clientDataJSON) 做 ES256/DER 签名。 */
+    assert({ rpId, challenge, origin, credentialId, signCount = 1 }) {
+      const authData = Buffer.concat([sha256(Buffer.from(rpId, 'utf8')), Buffer.from([FLAG_UP]), u32(signCount)]);
+      const clientData = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin, crossOrigin: false }), 'utf8');
+      const signature = cryptoSign('sha256', Buffer.concat([authData, sha256(clientData)]), { key: privateKey, dsaEncoding: 'der' });
+      return {
+        id: b64u(credentialId),
+        rawId: b64u(credentialId),
+        type: 'public-key',
+        response: { clientDataJSON: b64u(clientData), authenticatorData: b64u(authData), signature: b64u(signature) },
       };
     },
   };
@@ -461,6 +473,117 @@ test('task-16 对照：非空 token 时 WS 行为逐字不变（校验失败仍 
     assert.match(ok.statusLine, /^HTTP\/1\.1 101 /, `合法会话应升级成功，实际：${JSON.stringify(ok.statusLine)}`);
     assert.equal(f.upstream.upgrades.length, 1, '上游确实收到了这一次 upgrade');
     assert.equal(f.upstream.upgrades[0].path, '/api/events.mux', '路径原样透传');
+  } finally {
+    await f.close();
+  }
+});
+
+// ---------- task-20：login 入口的 fail closed（P6.3）+ P8.1 说明 ----------
+
+test('P6.3：受保护 Host + 空 token → login/begin 与 login/finish 也 401，三条入口语义一致', async () => {
+  const f = await fixture({ getToken: () => null });
+  try {
+    // 1) login/begin：不再 200 下发 challenge
+    const lb = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.loginBegin, {});
+    assert.equal(lb.status, 401, `空 token 下 login/begin 必须 401：${lb.body}`);
+    assert.equal(lb.json?.flowId, undefined, '不给 flowId');
+    assert.equal(lb.json?.challenge, undefined, '不下发挑战值');
+
+    // 2) login/finish：同样 401
+    const lf = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.loginFinish, { flowId: 'x' });
+    assert.equal(lf.status, 401, `空 token 下 login/finish 必须 401：${lf.body}`);
+
+    // 3) 与另外两条入口对齐（同一次运行里逐条断言，避免「各自单独测」看不出对称性）
+    const rb = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerBegin, {});
+    assert.equal(rb.status, 401, 'register/begin 仍 401');
+    const ws = await wsUpgrade(f.proxy.port, DOMAIN);
+    assert.match(ws.statusLine, /^HTTP\/1\.1 401 /, `WS upgrade 仍 401，实际：${JSON.stringify(ws.statusLine)}`);
+    const page = await getPath(f.proxy.port, DOMAIN, '/', { accept: 'text/html' });
+    assert.equal(page.status, 401, 'HTTP 闸门仍 401');
+
+    // 4) 一条上游连接都没有，且日志记录了 login 侧的 fail closed
+    assert.equal(f.upstream.upgrades.length, 0);
+    assert.equal(f.upstream.seen.length, 0);
+    assert.ok(f.logs.some((l) => /no PIN configured — refusing passkey login/.test(l)), `日志应记录 login 侧拒绝：${JSON.stringify(f.logs)}`);
+  } finally {
+    await f.close();
+  }
+});
+
+test('P6.3 对照：有 PIN 时 login 逐字不变 —— 免会话 begin + 设备通行密钥直接 finish 换会话', async () => {
+  const f = await fixture();
+  try {
+    const authr = softwareAuthenticator();
+    const credentialId = randomBytes(16);
+
+    // 先用 PIN 会话注册一把凭据（注册必须已登录）
+    const { session } = await loginWithPin(f.proxy.port, DOMAIN, PIN);
+    assert.ok(session, 'PIN 会话');
+    const rb = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerBegin, {}, { cookie: session });
+    assert.equal(rb.status, 200);
+    const reg = authr.register({ rpId: DOMAIN, challenge: rb.json.challenge, origin: `https://${DOMAIN}`, credentialId });
+    const rf = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerFinish, { flowId: rb.json.flowId, ...reg, name: '我的手机' }, { cookie: session });
+    assert.equal(rf.status, 200, `注册完成：${rf.body}`);
+    assert.match(deviceCookieOf(rf) ?? '', /; Secure/);
+
+    // login/begin：**不带任何 cookie**（这就是「不用等电脑批准」）
+    const lb = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.loginBegin, {});
+    assert.equal(lb.status, 200, `免会话 login/begin 必须仍然 200：${lb.body}`);
+    assert.ok(lb.json.flowId, '拿到 flowId');
+    assert.equal(lb.json.rpId, DOMAIN, 'rpId 来自 Host');
+    assert.deepEqual(lb.json.allowCredentials, [], '空 allowCredentials：支持可发现凭据');
+
+    // login/finish：设备凭据签名 → 200 + 会话 cookie + 设备 cookie（Secure）
+    const assertion = authr.assert({ rpId: DOMAIN, challenge: lb.json.challenge, origin: `https://${DOMAIN}`, credentialId, signCount: 1 });
+    const lf = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.loginFinish, { flowId: lb.json.flowId, ...assertion });
+    assert.equal(lf.status, 200, `通行密钥登录必须仍然可用：${lf.body}`);
+    assert.ok(lf.setCookies.some((c) => c.startsWith('dsh_pocket_token=')), '种会话 cookie（与 PIN 登录等价）');
+    const dev = deviceCookieOf(lf);
+    assert.ok(dev, '设备 cookie 续期');
+    assert.match(dev, /; Secure/);
+
+    // 用登录拿到的会话访问首页 → 正常代理到上游
+    const sessionCookie = lf.setCookies.find((c) => c.startsWith('dsh_pocket_token=')).split(';')[0];
+    const home = await getPath(f.proxy.port, DOMAIN, '/', { cookie: sessionCookie, accept: 'text/plain' });
+    assert.equal(home.status, 200, '登录后的会话可直接访问');
+
+    // 有 PIN 时不得出现 fail closed 日志
+    assert.equal(f.logs.some((l) => /no PIN configured/.test(l)), false, '有 PIN 时不该走 fail closed 分支');
+  } finally {
+    await f.close();
+  }
+});
+
+test('P8.1：login 侧不设 https 门槛（记录实测），但任何情况下都不会下发不带 Secure 的设备 cookie', async () => {
+  const f = await fixture();
+  try {
+    const authr = softwareAuthenticator();
+    const credentialId = randomBytes(16);
+    const { session } = await loginWithPin(f.proxy.port, DOMAIN, PIN);
+    const rb = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerBegin, {}, { cookie: session });
+    const reg = authr.register({ rpId: DOMAIN, challenge: rb.json.challenge, origin: `https://${DOMAIN}`, credentialId });
+    assert.equal((await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerFinish, { flowId: rb.json.flowId, ...reg }, { cookie: session })).status, 200);
+
+    // 对照：注册侧 http 一律 400（task-13 的 D-1 门槛）
+    const httpReg = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerBegin, {}, { cookie: session, 'x-forwarded-proto': 'http' });
+    assert.equal(httpReg.status, 400, 'register/begin 在 http 下必须 400');
+
+    // 实测：login 侧**没有** https 门槛（P8.1，与 verify-passkey 的观测一致）。
+    // 这里不断言必须是 200（将来若补门槛也允许），只钉住「不是 5xx」+「不得下发非 Secure 设备 cookie」。
+    const lb = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.loginBegin, {}, { 'x-forwarded-proto': 'http' });
+    assert.ok(lb.status < 500, `login/begin 不得 5xx，实际 ${lb.status}`);
+    if (lb.status === 200) {
+      const assertion = authr.assert({ rpId: DOMAIN, challenge: lb.json.challenge, origin: `http://${DOMAIN}`, credentialId, signCount: 1 });
+      const lf = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.loginFinish, { flowId: lb.json.flowId, ...assertion }, { 'x-forwarded-proto': 'http' });
+      assert.ok(lf.status < 500, `login/finish 不得 5xx，实际 ${lf.status}`);
+      const dev = deviceCookieOf(lf);
+      if (dev) assert.match(dev, /; Secure/, 'http 上下文下发的设备 cookie 也必须带 Secure（task-13 起无条件 Secure）');
+      assert.ok(lf.setCookies.every((c) => !c.startsWith(`${DEVICE_COOKIE}=`) || /; Secure/.test(c)), '不存在不带 Secure 的设备 cookie');
+    }
+
+    // 不管上面走哪条分支，代理都还活着
+    const after = await getPath(f.proxy.port, DOMAIN, '/', { cookie: session, accept: 'text/plain' });
+    assert.equal(after.status, 200);
   } finally {
     await f.close();
   }
