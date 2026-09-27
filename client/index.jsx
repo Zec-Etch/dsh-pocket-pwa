@@ -242,16 +242,27 @@ function PocketSettingsTab({ rpcCall, t }) {
   const [disclaimerChecked, setDisclaimerChecked] = useState(false);
 
   const doStartTunnel = async () => {
-    // 命名隧道模式：Token/域名没配齐就不发起（服务端同样会拒绝）
-    const cfg = status?.tunnelConfig;
-    if (cfg?.mode === 'named' && (!cfg.hostname || !cfg.tokenSet)) {
-      setError(t('namedNeedCfg'));
-      return;
-    }
-    // SSH 通道：主机/用户名没填齐就不发起（服务端同样会拒绝）
-    if (cfg?.mode === 'ssh' && (!status?.ssh?.config?.host || !status?.ssh?.config?.user)) {
-      setError(t('sshNeedCfg'));
-      return;
+    // 「用户选中的通道」就是「将要启动的通道」。选中但尚未保存的配置先在这里落盘，
+    // 落盘失败或字段不齐就中止 —— 绝不允许「以为在开 SSH、实际拉起 Cloudflare 隧道」
+    // （用户实测反馈：配完 SSH 点启动却开了 cloudflared，根因就是选中态没落盘）。
+    const target = pendingMode ?? publicMode;
+    if (target === 'ssh') {
+      const editing = pendingMode === 'ssh' && sshCfg !== null;
+      const src = editing ? sshForm : { host: sshConfigView.host ?? '', user: sshConfigView.user ?? '' };
+      if (!String(src.host ?? '').trim() || !String(src.user ?? '').trim()) {
+        setError(t('sshNeedCfg'));
+        return;
+      }
+      if (editing && !(await saveSshConfig())) return; // 先保存（保存即把模式切成 ssh）
+    } else if (target === 'named') {
+      const editing = pendingMode === 'named' && tunnelCfg !== null;
+      const hostname = editing ? String(tunnelCfg?.hostname ?? '').trim() : String(tunnelModeView.hostname ?? '').trim();
+      const tokenReady = editing ? !!(tunnelCfg?.token || tunnelModeView.tokenSet) : !!tunnelModeView.tokenSet;
+      if (!hostname || !tokenReady) {
+        setError(t('namedNeedCfg'));
+        return;
+      }
+      if (editing && !(await saveNamedTunnel())) return; // 先保存（保存即把模式切成 named）
     }
     setBusy(true);
     setError(null);
@@ -282,6 +293,10 @@ function PocketSettingsTab({ rpcCall, t }) {
   // 公网模式（issue #66）：随机域名（默认零配置）/ 固定域名（Cloudflare 命名隧道 + Tunnel Token）
   // tunnelCfg：编辑态 { hostname, token, err } | null；token 输入留空 = 保持已存的 Token 不变
   const [tunnelCfg, setTunnelCfg] = useState(null);
+  // 已选中但尚未保存的公网模式（'named' | 'ssh' | null）。用户点模式按钮只是展开表单，
+  // 模式本身要等「保存」才落盘；这段窗口里如果直接点启动，必须仍然按"用户选中的通道"
+  // 来启动，而不是按已存的旧模式（否则就会出现"配了 SSH 却开了 Cloudflare"）。
+  const [pendingMode, setPendingMode] = useState(null);
   const switchToQuick = async () => {
     try { setStatus(await call(POCKET_ENDPOINTS.tunnelSetConfig, { mode: 'quick' })); } catch (err) { setError(err.message); }
   };
@@ -293,8 +308,11 @@ function PocketSettingsTab({ rpcCall, t }) {
         token: tunnelCfg?.token || undefined, // 留空不覆盖已存 Token
       }));
       setTunnelCfg(null);
+      setPendingMode(null); // 已落盘：选中态与已存模式重新对齐
+      return true;
     } catch (err) {
       setTunnelCfg((c) => ({ ...c, err: err.message }));
+      return false;
     }
   };
 
@@ -469,6 +487,12 @@ function PocketSettingsTab({ rpcCall, t }) {
   const [sshTesting, setSshTesting] = useState(false);
 
   const publicMode = tunnelModeView?.mode === 'ssh' ? 'ssh' : (tunnelModeView?.mode === 'named' ? 'named' : 'quick');
+  // 将要启动的通道 = 用户选中的（含尚未保存的选中态）：启动按钮文案与启动校验都以此为准
+  const willStartMode = pendingMode ?? publicMode;
+  const channelLabel = (m) => t(m === 'ssh' ? 'channelSsh' : (m === 'named' ? 'channelNamed' : 'channelQuick'));
+  const pendingModeHint = pendingMode && pendingMode !== publicMode
+    ? fmt(t, 'modePendingHint', { channel: channelLabel(pendingMode) })
+    : null;
   const sshView = status?.ssh ?? null; // null = 旧宿主不返回该字段
   const sshRunning = sshView?.running === true;
   const sshMode = publicMode === 'ssh';
@@ -476,7 +500,6 @@ function PocketSettingsTab({ rpcCall, t }) {
   const sshStateKey = SSH_STATE_TEXT[sshState] ?? SSH_STATE_TEXT.idle;
   const sshEdit = sshCfg !== null;
   const sshActive = sshEdit || sshMode || sshRunning;
-  const sshStarting = sshState === 'starting' || sshState === 'reconnecting';
   const sshConfigView = sshView?.config ?? {};
   // 访问地址：宿主给的 url 优先，否则按 accessProtocol + accessHost(+accessPort) 本地拼
   const sshAddress = sshView?.url ?? buildAccessUrl(sshConfigView);
@@ -524,7 +547,7 @@ function PocketSettingsTab({ rpcCall, t }) {
     const user = String(f.user ?? '').trim();
     if (!host || !user) {
       setSshCfg((c) => ({ ...(c ?? f), err: t('sshNeedCfg') }));
-      return;
+      return false;
     }
     try {
       const next = await call(POCKET_ENDPOINTS.sshSetConfig, {
@@ -541,9 +564,12 @@ function PocketSettingsTab({ rpcCall, t }) {
       });
       mergeStatus(next);
       setSshCfg(null); // 回到回显态（值以宿主返回为准）
+      setPendingMode(null); // 已落盘：选中态与已存模式重新对齐
       showToast(t('sshSaved'));
+      return true;
     } catch (err) {
       setSshCfg((c) => ({ ...(c ?? f), err: err.message }));
+      return false;
     }
   };
   // 测试连接：ssh.status 带 test:true，宿主应做一次真实探测并回 test:{ok,message}；
@@ -569,19 +595,26 @@ function PocketSettingsTab({ rpcCall, t }) {
     }
   };
 
-  // 模式切换（互斥）：Quick 直接切回；Named/SSH 先展开配置表单，保存后才切换
+  // 模式切换（互斥）：Quick 直接切回；Named/SSH 先展开配置表单，保存后才切换。
+  // pendingMode 记录"选中但尚未保存"的模式，保证启动按钮按用户选中的通道启动（见 doStartTunnel）。
   const selectQuick = () => {
     setTunnelCfg(null);
     setSshCfg(null);
+    setPendingMode(null);
     if (publicMode !== 'quick') switchToQuick();
   };
   const selectNamed = () => {
     setSshCfg(null);
-    setTunnelCfg(tunnelCfg ? null : { hostname: tunnelModeView.hostname ?? '', token: '', err: null });
+    const open = tunnelCfg === null;
+    setTunnelCfg(open ? { hostname: tunnelModeView.hostname ?? '', token: '', err: null } : null);
+    setPendingMode(open ? 'named' : null);
   };
   const selectSsh = () => {
     setTunnelCfg(null);
-    if (!sshCfg) openSshEditor();
+    const open = sshCfg === null;
+    if (open) openSshEditor();
+    // 旧宿主不返回 status.ssh（不支持该通道）：不置 pendingMode，避免去调不存在的 ssh.setConfig
+    setPendingMode(open && sshView !== null ? 'ssh' : null);
   };
   // 表单排版：标签在上、控件在下（窄屏单列，不依赖 hover，不横向挤压）。
   // 用 div 而不是 label：内部可能放 Switch 按钮，label 会把点击转发给它造成误触。
@@ -641,15 +674,14 @@ function PocketSettingsTab({ rpcCall, t }) {
           t('sshAutoRestoreHint')),
       ) : null,
       sshForm.err ? h('div', { style: { color: COLOR_ERR, marginTop: 6, fontSize: 12, lineHeight: 1.5, wordBreak: 'break-word' } }, errText(sshForm.err)) : null,
-      // 操作：保存 / 启动(停止)隧道 / 测试连接（窄屏自动换行）
+      // 操作：保存 / 测试连接。启动与停止统一走上方唯一的「开启公网访问（…）」按钮 ——
+      // 同一动作不再出现两个文案不同、职责不清的入口（用户实测反馈）。
       h('div', { style: { marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' } },
         h('button', { style: styles.smallBtn, onClick: saveSshConfig }, t('save')),
-        sshRunning
-          ? h('button', { style: { ...styles.smallBtn, color: COLOR_ERR }, onClick: stopTunnel }, t('sshStop'))
-          : h('button', { style: { ...styles.primary, height: 28, padding: '0 14px', fontSize: 12 }, onClick: startTunnel, disabled: busy || sshStarting }, busy || sshStarting ? t('sshStarting') : t('sshStart')),
         h('button', { style: styles.smallBtn, onClick: testSshConnection, disabled: sshTesting }, sshTesting ? t('sshTesting') : t('sshTest')),
-        sshEdit ? h('button', { style: styles.smallBtn, onClick: () => setSshCfg(null) }, t('cancel')) : null,
+        sshEdit ? h('button', { style: styles.smallBtn, onClick: () => { setSshCfg(null); if (!sshMode) setPendingMode(null); } }, t('cancel')) : null,
       ),
+      h('div', { style: { ...styles.muted, marginTop: 6 } }, t('sshStartHint')),
     ),
   );
 
@@ -1020,7 +1052,7 @@ function PocketSettingsTab({ rpcCall, t }) {
         h('span', { style: { fontWeight: 600, fontSize: 13 } }, t('wanAccess')),
         publicRunning
           ? h('button', { style: { ...styles.btn, height: 28, padding: '0 12px', fontSize: 12, color: 'var(--dsw-alias-state-error-primary,#dc2626)' }, onClick: stopTunnel }, t('stopTunnel'))
-          : h('button', { style: { ...styles.primary, height: 28, padding: '0 14px', fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t('opening') : t('enable')),
+          : h('button', { style: { ...styles.primary, height: 28, padding: '0 14px', fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t('opening') : fmt(t, 'startChannel', { channel: channelLabel(willStartMode) })),
       ),
       tunnelStarting
         ? h('div', { style: { marginTop: 8, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)' } },
@@ -1039,6 +1071,8 @@ function PocketSettingsTab({ rpcCall, t }) {
               h('button', { style: modeBtnStyle(sshActive), onClick: selectSsh }, t('modeSsh')),
             ),
             h('div', { style: { marginTop: 6 } },
+              // 选中了通道但还没保存：明确告知"点开始会先保存并启动哪条通道"，不再默默开成另一条
+              pendingModeHint ? h('div', { style: { ...styles.warn } }, pendingModeHint) : null,
               // 刚保存固定域名但当前连接仍是随机域名：需关闭后重新开启才生效
               namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? '') ? h('div', { style: { ...styles.warn } }, t('namedTakeEffect')) : null,
               // 固定域名：已保存摘要 + 修改入口（非编辑态）
@@ -1073,7 +1107,7 @@ function PocketSettingsTab({ rpcCall, t }) {
                 ),
                 h('div', { style: { marginTop: 6, display: 'flex', gap: 8 } },
                   h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12 }, onClick: saveNamedTunnel }, t('save')),
-                  h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12 }, onClick: () => setTunnelCfg(null) }, t('cancel')),
+                  h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12 }, onClick: () => { setTunnelCfg(null); if (!namedMode) setPendingMode(null); } }, t('cancel')),
                 ),
                 h('div', { style: { ...styles.muted, marginTop: 6 } }, t('namedHow')),
                 h('div', { style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-state-warn-primary,#b45309)', lineHeight: 1.5 } }, t('namedSecurity')),

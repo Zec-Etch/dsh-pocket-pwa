@@ -43,9 +43,10 @@ const NOTIFY_PRESETS = ['generic', 'wecom', 'dingtalk', 'feishu', 'ntfy', 'bark'
 const NEW_KEYS = [
   'modeSsh', 'sshTitle', 'sshHint', 'sshHost', 'sshPort', 'sshUser', 'sshKeyPath', 'sshKeyPathHint',
   'sshKeyPathSet', 'sshRemoteBindPort', 'sshRemoteBindPortHint', 'sshAccessProtocol', 'sshAccessHost',
-  'sshAccessHostHint', 'sshAccessPort', 'sshAutoRestore', 'sshAutoRestoreHint', 'sshNeedCfg', 'sshStart',
-  'sshStop', 'sshStarting', 'sshTest', 'sshTesting', 'sshTestOk', 'sshTestFail', 'sshTestUnavailable',
+  'sshAccessHostHint', 'sshAccessPort', 'sshAutoRestore', 'sshAutoRestoreHint', 'sshNeedCfg', 'sshStartHint',
+  'sshTest', 'sshTesting', 'sshTestOk', 'sshTestFail', 'sshTestUnavailable',
   'sshSaved', 'sshLastError', 'sshUrlHint', 'sshRunningHint',
+  'startChannel', 'channelQuick', 'channelNamed', 'channelSsh', 'modePendingHint',
   'notifyTitle', 'notifyPush', 'notifyPushHint', 'notifySubsCount', 'notifySubscribe', 'notifyUnsubscribe',
   'notifySubscribed', 'notifyUnsubscribed', 'notifySubscribeFailed', 'notifyUnsubscribeFailed',
   'notifyPushUnsupported', 'notifyTest', 'notifyTesting', 'notifyTestSent', 'notifyTestFailed',

@@ -519,7 +519,7 @@ test('设置页（task-6）：新宿主完整状态渲染不崩，三通道/通�
   assert.ok(texts.includes('dsh.example.com'), 'SSH 访问地址没渲染');
   assert.ok(texts.includes(`Web Push · ${POCKET_ZH.notifyResultOk}`), '最近推送结果没渲染');
   // 关键按钮都在，且可安装时给出「安装到主屏」
-  assert.ok(tab.buttons(POCKET_ZH.sshStop).length, 'SSH 运行中应显示「停止隧道」');
+  assert.ok(tab.buttons(POCKET_ZH.stopTunnel).length, '公网入口运行中应显示唯一的「关闭公网」按钮');
   assert.ok(tab.buttons(POCKET_ZH.sshTest).length, '应有「测试连接」');
   assert.ok(tab.buttons(POCKET_ZH.notifyTest).length, '应有「发送测试通知」');
   assert.ok(tab.buttons(POCKET_ZH.notifyClear).length, '有订阅时应显示「清空全部订阅」');
@@ -591,10 +591,10 @@ test('设置页（task-6）：SSH 保存/测试连接走冻结端点，字段与
   const probe = tab.rpcCalls.find((c) => c.endpoint === POCKET_ENDPOINTS.sshStatus);
   assert.ok(probe, '测试连接没打到 ssh.status');
   assert.deepEqual({ ...probe.payload }, { test: true });
-  // 运行中：stop 按钮走 tunnel.stop（不新增端点）
-  await tab.click(POCKET_ZH.sshStop);
-  assert.ok(tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.tunnelStop), '停止隧道没打到 tunnel.stop');
-  // 切到固定域名：只展开既有表单，不立刻改模式（保存时才切）
+  // 运行中：唯一的停止按钮走 tunnel.stop（不新增端点，SSH 与 cloudflared 一起停）
+  await tab.click(POCKET_ZH.stopTunnel);
+  assert.ok(tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.tunnelStop), '关闭公网没打到 tunnel.stop');
+  // 切到固定域名：只展开既有表单并记为"选中但未保存"，不立刻改已存模式（保存时才切）
   await tab.click(POCKET_ZH.modeNamed);
   await tab.settle(1);
   assert.ok(tab.texts().includes(POCKET_ZH.namedHostnameLabel), '切到固定域名应展开既有表单');
@@ -629,6 +629,89 @@ test('设置页（task-6）：旧宿主（无 ssh/notify/passkey 字段）只降
   assert.ok(!called.has(POCKET_ENDPOINTS.sshSetConfig), '旧宿主不该写 ssh.setConfig');
   // 非 HTTPS（局域网 http）时通行密钥文案优先解释安全上下文
   assert.ok(texts.includes(POCKET_ZH.passkeyInsecure) || texts.includes(POCKET_ZH.hostUnsupported));
+});
+
+/** Quick 模式、SSH 尚未配置：复现用户实测场景「配完 SSH 点启动却开了 Cloudflare」。 */
+const QUICK_UNCONFIGURED_STATUS = {
+  ...FULL_STATUS,
+  tunnelRunning: false, tunnelUrl: null, tunnelQr: null, tunnelState: { phase: 'idle' },
+  tunnelConfig: { mode: 'quick', hostname: '', tokenSet: false },
+  ssh: {
+    running: false, state: 'idle', url: null, qr: null, lastError: null,
+    config: { host: '', port: 22, user: '', keyPathSet: false, remoteBindPort: 7788, accessProtocol: 'https', accessHost: '', accessPort: 0, autoRestore: true },
+  },
+};
+const startLabelFor = (key) => POCKET_ZH.startChannel.replace('{channel}', POCKET_ZH[key]);
+/** 状态接口固定返回"Quick 模式 + SSH 未配置"，其余端点沿用 fullRpc。 */
+const quickRpc = (endpoint, payload) => (endpoint === POCKET_ENDPOINTS.status ? QUICK_UNCONFIGURED_STATUS : fullRpc(endpoint, payload));
+/** 走完「点启动 → 勾选免责声明 → 确认」的完整手势。 */
+async function startViaDisclaimer(tab, label) {
+  await tab.click(label);
+  const checkbox = tab.nodes((n) => n.type === 'input' && n.props.type === 'checkbox')[0];
+  assert.ok(checkbox, '免责声明弹窗应出现勾选框');
+  checkbox.props.onChange({ target: { checked: true } });
+  await tab.settle(1);
+  await tab.click(POCKET_ZH.disclaimerAgree);
+  await tab.settle(2);
+}
+
+test('设置页：公网入口只有一个启动按钮，文案指明将要启动的通道，SSH 区块内不再有启动按钮', async () => {
+  const tab = await mountSettingsTab({ status: QUICK_UNCONFIGURED_STATUS, rpc: quickRpc });
+  await tab.settle();
+  assert.equal(tab.buttons(startLabelFor('channelQuick')).length, 1, 'Quick 模式应只有一个启动按钮');
+  assert.equal(tab.buttons(POCKET_ZH.enable).length, 0, '不应再出现不带通道名的笼统「开启公网访问」按钮');
+  // 选中 SSH（尚未保存）：按钮文案立刻指向 SSH 隧道，并给出未保存提示
+  await tab.click(POCKET_ZH.modeSsh);
+  await tab.settle(2);
+  assert.equal(tab.buttons(startLabelFor('channelSsh')).length, 1, '选中 SSH 后启动按钮应指向 SSH 隧道');
+  assert.equal(tab.buttons(startLabelFor('channelQuick')).length, 0, '不应同时出现两条通道的启动按钮');
+  assert.ok(tab.texts().includes(POCKET_ZH.modePendingHint.replace('{channel}', POCKET_ZH.channelSsh)), '应有未保存提示');
+  // 整页只允许一个启动入口（SSH 区块内的重复启动按钮已删除），区块内只保留保存/测试连接
+  const startish = collect(tab.tree, (n) => n.type === 'button').map(textOf).filter((txt) => txt.includes('开启公网访问'));
+  assert.equal(startish.length, 1, '整页只应有一个启动入口');
+  const sshButtons = collect(tab.section('sshTitle'), (n) => n.type === 'button').map(textOf);
+  assert.ok(sshButtons.includes(POCKET_ZH.save) && sshButtons.includes(POCKET_ZH.sshTest), 'SSH 区块应保留保存与测试连接');
+  assert.ok(sshButtons.includes(POCKET_ZH.sshStartHint) === false, 'SSH 区块按钮里不应再出现启动隧道文案');
+});
+
+test('设置页：配好 SSH 但未保存就点启动 → 先保存 SSH 配置再启动，绝不悄悄开 Cloudflare', async () => {
+  const tab = await mountSettingsTab({ status: QUICK_UNCONFIGURED_STATUS, rpc: quickRpc });
+  await tab.settle();
+  await tab.click(POCKET_ZH.modeSsh);
+  await tab.settle(2);
+  const hostInput = tab.nodes((n) => n.type === 'input' && n.props.placeholder === 'vps.example.com')[0];
+  assert.ok(hostInput, 'SSH 主机输入框没渲染');
+  hostInput.props.onChange({ target: { value: 'vps.test' } });
+  await tab.settle(2);
+  const userInput = tab.nodes((n) => n.type === 'input' && n.props.placeholder === 'dsh')[0];
+  userInput.props.onChange({ target: { value: 'deploy' } });
+  await tab.settle(2);
+
+  await startViaDisclaimer(tab, startLabelFor('channelSsh'));
+
+  const saveIdx = tab.rpcCalls.findIndex((c) => c.endpoint === POCKET_ENDPOINTS.sshSetConfig);
+  const startIdx = tab.rpcCalls.findIndex((c) => c.endpoint === POCKET_ENDPOINTS.tunnelStart);
+  assert.ok(saveIdx >= 0, '必须先落盘 SSH 配置（ssh.setConfig）');
+  assert.ok(startIdx >= 0, '随后应发起 tunnel.start');
+  assert.ok(saveIdx < startIdx, '顺序必须是先保存 SSH 配置、再启动隧道');
+  assert.equal(tab.rpcCalls[saveIdx].payload.mode, 'ssh');
+  assert.equal(tab.rpcCalls[saveIdx].payload.host, 'vps.test');
+  assert.equal(tab.rpcCalls[saveIdx].payload.user, 'deploy');
+  assert.ok(
+    !tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.tunnelSetConfig && c.payload?.mode === 'quick'),
+    '不应在用户选择 SSH 的情况下切回 Cloudflare',
+  );
+});
+
+test('设置页：选中 SSH 但主机/用户名没填 → 启动被明确阻止，不落盘也不发起隧道', async () => {
+  const tab = await mountSettingsTab({ status: QUICK_UNCONFIGURED_STATUS, rpc: quickRpc });
+  await tab.settle();
+  await tab.click(POCKET_ZH.modeSsh);
+  await tab.settle(2);
+  await startViaDisclaimer(tab, startLabelFor('channelSsh'));
+  assert.ok(!tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.tunnelStart), '配置不全时绝不能发起隧道');
+  assert.ok(!tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.sshSetConfig), '配置不全时也不该落盘');
+  assert.ok(tab.texts().includes(POCKET_ZH.sshNeedCfg), '应明确提示「请先填写 SSH 主机与用户名」');
 });
 
 

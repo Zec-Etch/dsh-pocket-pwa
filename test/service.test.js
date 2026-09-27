@@ -1178,6 +1178,43 @@ test('SSH 通道：模式互斥 —— 从 ssh 切回 cloudflared 会停掉 ssh�
   }
 });
 
+test('回归（用户实测）：mode=ssh 时 startTunnel 只拉起 ssh，绝不触碰 cloudflared', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const ssh = fakeSshSpawn();
+  const internals = stubInternals();
+  let cloudflaredCalls = 0;
+  internals.sshSpawnImpl = ssh.spawnImpl;
+  internals.startTunnel = async () => { cloudflaredCalls += 1; return 'https://should-not-be-used.trycloudflare.com'; };
+
+  settings.setTunnelMode('ssh');
+  settings.setSshHost('vps.example.com');
+  settings.setSshUser('dsh');
+  const service = createPocketService({
+    dshPort: 3080, port: 3081, home, internals,
+    getSshConfig: () => settings.sshChannelConfig(),
+    getTunnelConfig: () => ({ mode: settings.tunnelMode() }),
+  });
+  try {
+    const p = service.startTunnel();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(ssh.calls.length, 1, '应且只应 spawn 一次 ssh');
+    assert.ok(String(ssh.calls[0].cmd).includes('ssh'), `spawn 的必须是 ssh，实际 ${ssh.calls[0].cmd}`);
+    assert.ok(ssh.calls[0].args.includes('-R'), '必须带 -R 反向转发');
+    ssh.children[0].stderr.emit('data', `${SSH_OK_LINE}\n`);
+    await p;
+    const st = await service.status();
+    assert.equal(st.ssh.running, true, 'ssh 通道应处于运行中');
+    assert.equal(st.tunnelConfig.mode, 'ssh');
+    assert.equal(st.tunnelRunning, true);
+    assert.equal(cloudflaredCalls, 0, 'ssh 模式下绝不能启动 cloudflared');
+    assert.equal(st.tunnelUrl, null, 'ssh 模式下 tunnelUrl 不应伪装成 cloudflared 地址');
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});
+
 test('SSH 自动恢复：marker + mode=ssh + autoRestore=true 自动拉起；autoRestore=false 时尊重设置', async () => {
   const { home, restore } = withTempHome();
   const settings = await import('../lib/settings.mjs');

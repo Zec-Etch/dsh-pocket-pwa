@@ -2058,6 +2058,11 @@ var zh2 = {
   "stopTunnel": "\u5173\u95ED\u516C\u7F51",
   "enable": "\u5F00\u542F\u516C\u7F51\u8BBF\u95EE",
   "opening": "\u5F00\u542F\u4E2D\u2026",
+  "startChannel": "\u5F00\u542F\u516C\u7F51\u8BBF\u95EE\uFF08{channel}\uFF09",
+  "channelQuick": "Cloudflare \u5FEB\u901F\u96A7\u9053",
+  "channelNamed": "Cloudflare \u56FA\u5B9A\u57DF\u540D",
+  "channelSsh": "SSH \u53CD\u5411\u96A7\u9053",
+  "modePendingHint": "\u300C{channel}\u300D\u5C1A\u672A\u4FDD\u5B58\uFF1A\u70B9\u51FB\u5F00\u59CB\u4F1A\u5148\u4FDD\u5B58\u5E76\u542F\u52A8\u5B83",
   "tunnelMode": "\u516C\u7F51\u6A21\u5F0F\uFF1A",
   "modeQuick": "\u968F\u673A\u57DF\u540D\uFF08\u9ED8\u8BA4\uFF09",
   "modeNamed": "\u56FA\u5B9A\u57DF\u540D",
@@ -2100,9 +2105,7 @@ var zh2 = {
   "sshAutoRestore": "DSH \u91CD\u542F\u540E\u81EA\u52A8\u6062\u590D",
   "sshAutoRestoreHint": "\u5730\u5740\u4E0D\u968F\u91CD\u542F\u53D8\u5316\uFF1B\u5173\u95ED\u540E\u6BCF\u6B21\u91CD\u542F\u90FD\u8981\u624B\u52A8\u5F00\u542F\u96A7\u9053",
   "sshNeedCfg": "\u8BF7\u5148\u586B\u5199 SSH \u4E3B\u673A\u4E0E\u7528\u6237\u540D",
-  "sshStart": "\u542F\u52A8\u96A7\u9053",
-  "sshStop": "\u505C\u6B62\u96A7\u9053",
-  "sshStarting": "\u542F\u52A8\u4E2D\u2026",
+  "sshStartHint": "\u542F\u52A8/\u505C\u6B62\u96A7\u9053\u8BF7\u7528\u4E0A\u65B9\u300C\u5F00\u542F\u516C\u7F51\u8BBF\u95EE\u300D\u6309\u94AE\uFF08\u4E0E\u53E6\u5916\u4E24\u6761\u901A\u9053\u4E92\u65A5\uFF09",
   "sshTest": "\u6D4B\u8BD5\u8FDE\u63A5",
   "sshTesting": "\u6D4B\u8BD5\u4E2D\u2026",
   "sshTestOk": "\u2705 \u8FDE\u63A5\u6B63\u5E38",
@@ -2273,6 +2276,11 @@ var en2 = {
   "stopTunnel": "Stop",
   "enable": "Enable anywhere",
   "opening": "Enabling\u2026",
+  "startChannel": "Enable public access ({channel})",
+  "channelQuick": "Cloudflare Quick Tunnel",
+  "channelNamed": "Cloudflare Fixed Domain",
+  "channelSsh": "SSH Reverse Tunnel",
+  "modePendingHint": "\u201C{channel}\u201D is not saved yet \u2014 starting will save and launch it",
   "tunnelMode": "Mode:",
   "modeQuick": "Random URL (default)",
   "modeNamed": "Fixed domain",
@@ -2315,9 +2323,7 @@ var en2 = {
   "sshAutoRestore": "Auto-restore after a DSH restart",
   "sshAutoRestoreHint": "The address stays the same across restarts; when off you must start the tunnel manually each time",
   "sshNeedCfg": "Fill in the SSH host and username first",
-  "sshStart": "Start tunnel",
-  "sshStop": "Stop tunnel",
-  "sshStarting": "Starting\u2026",
+  "sshStartHint": "Start/stop the tunnel with the \u201CEnable public access\u201D button above (the three channels are mutually exclusive)",
   "sshTest": "Test connection",
   "sshTesting": "Testing\u2026",
   "sshTestOk": "\u2705 Connection OK",
@@ -2629,14 +2635,24 @@ function PocketSettingsTab({ rpcCall, t }) {
   const [disclaimerOpen, setDisclaimerOpen] = (0, import_react2.useState)(false);
   const [disclaimerChecked, setDisclaimerChecked] = (0, import_react2.useState)(false);
   const doStartTunnel = async () => {
-    const cfg = status?.tunnelConfig;
-    if (cfg?.mode === "named" && (!cfg.hostname || !cfg.tokenSet)) {
-      setError(t("namedNeedCfg"));
-      return;
-    }
-    if (cfg?.mode === "ssh" && (!status?.ssh?.config?.host || !status?.ssh?.config?.user)) {
-      setError(t("sshNeedCfg"));
-      return;
+    const target = pendingMode ?? publicMode;
+    if (target === "ssh") {
+      const editing = pendingMode === "ssh" && sshCfg !== null;
+      const src = editing ? sshForm : { host: sshConfigView.host ?? "", user: sshConfigView.user ?? "" };
+      if (!String(src.host ?? "").trim() || !String(src.user ?? "").trim()) {
+        setError(t("sshNeedCfg"));
+        return;
+      }
+      if (editing && !await saveSshConfig()) return;
+    } else if (target === "named") {
+      const editing = pendingMode === "named" && tunnelCfg !== null;
+      const hostname = editing ? String(tunnelCfg?.hostname ?? "").trim() : String(tunnelModeView.hostname ?? "").trim();
+      const tokenReady = editing ? !!(tunnelCfg?.token || tunnelModeView.tokenSet) : !!tunnelModeView.tokenSet;
+      if (!hostname || !tokenReady) {
+        setError(t("namedNeedCfg"));
+        return;
+      }
+      if (editing && !await saveNamedTunnel()) return;
     }
     setBusy(true);
     setError(null);
@@ -2665,6 +2681,7 @@ function PocketSettingsTab({ rpcCall, t }) {
     }
   };
   const [tunnelCfg, setTunnelCfg] = (0, import_react2.useState)(null);
+  const [pendingMode, setPendingMode] = (0, import_react2.useState)(null);
   const switchToQuick = async () => {
     try {
       setStatus(await call(POCKET_ENDPOINTS.tunnelSetConfig, { mode: "quick" }));
@@ -2681,8 +2698,11 @@ function PocketSettingsTab({ rpcCall, t }) {
         // 留空不覆盖已存 Token
       }));
       setTunnelCfg(null);
+      setPendingMode(null);
+      return true;
     } catch (err) {
       setTunnelCfg((c) => ({ ...c, err: err.message }));
+      return false;
     }
   };
   const [resetOpen, setResetOpen] = (0, import_react2.useState)(false);
@@ -2848,6 +2868,9 @@ function PocketSettingsTab({ rpcCall, t }) {
   const [sshTestResult, setSshTestResult] = (0, import_react2.useState)(null);
   const [sshTesting, setSshTesting] = (0, import_react2.useState)(false);
   const publicMode = tunnelModeView?.mode === "ssh" ? "ssh" : tunnelModeView?.mode === "named" ? "named" : "quick";
+  const willStartMode = pendingMode ?? publicMode;
+  const channelLabel = (m) => t(m === "ssh" ? "channelSsh" : m === "named" ? "channelNamed" : "channelQuick");
+  const pendingModeHint = pendingMode && pendingMode !== publicMode ? fmt(t, "modePendingHint", { channel: channelLabel(pendingMode) }) : null;
   const sshView = status?.ssh ?? null;
   const sshRunning = sshView?.running === true;
   const sshMode = publicMode === "ssh";
@@ -2855,7 +2878,6 @@ function PocketSettingsTab({ rpcCall, t }) {
   const sshStateKey = SSH_STATE_TEXT[sshState] ?? SSH_STATE_TEXT.idle;
   const sshEdit = sshCfg !== null;
   const sshActive = sshEdit || sshMode || sshRunning;
-  const sshStarting = sshState === "starting" || sshState === "reconnecting";
   const sshConfigView = sshView?.config ?? {};
   const sshAddress = sshView?.url ?? buildAccessUrl(sshConfigView);
   const sshForm = sshCfg ?? {
@@ -2898,7 +2920,7 @@ function PocketSettingsTab({ rpcCall, t }) {
     const user = String(f.user ?? "").trim();
     if (!host || !user) {
       setSshCfg((c) => ({ ...c ?? f, err: t("sshNeedCfg") }));
-      return;
+      return false;
     }
     try {
       const next = await call(POCKET_ENDPOINTS.sshSetConfig, {
@@ -2917,9 +2939,12 @@ function PocketSettingsTab({ rpcCall, t }) {
       });
       mergeStatus(next);
       setSshCfg(null);
+      setPendingMode(null);
       showToast(t("sshSaved"));
+      return true;
     } catch (err) {
       setSshCfg((c) => ({ ...c ?? f, err: err.message }));
+      return false;
     }
   };
   const testSshConnection = async () => {
@@ -2945,15 +2970,20 @@ function PocketSettingsTab({ rpcCall, t }) {
   const selectQuick = () => {
     setTunnelCfg(null);
     setSshCfg(null);
+    setPendingMode(null);
     if (publicMode !== "quick") switchToQuick();
   };
   const selectNamed = () => {
     setSshCfg(null);
-    setTunnelCfg(tunnelCfg ? null : { hostname: tunnelModeView.hostname ?? "", token: "", err: null });
+    const open = tunnelCfg === null;
+    setTunnelCfg(open ? { hostname: tunnelModeView.hostname ?? "", token: "", err: null } : null);
+    setPendingMode(open ? "named" : null);
   };
   const selectSsh = () => {
     setTunnelCfg(null);
-    if (!sshCfg) openSshEditor();
+    const open = sshCfg === null;
+    if (open) openSshEditor();
+    setPendingMode(open && sshView !== null ? "ssh" : null);
   };
   const sshField = (label, node, hint) => (0, import_react2.createElement)(
     "div",
@@ -3039,15 +3069,19 @@ function PocketSettingsTab({ rpcCall, t }) {
         )
       ) : null,
       sshForm.err ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR, marginTop: 6, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word" } }, errText(sshForm.err)) : null,
-      // 操作：保存 / 启动(停止)隧道 / 测试连接（窄屏自动换行）
+      // 操作：保存 / 测试连接。启动与停止统一走上方唯一的「开启公网访问（…）」按钮 ——
+      // 同一动作不再出现两个文案不同、职责不清的入口（用户实测反馈）。
       (0, import_react2.createElement)(
         "div",
         { style: { marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" } },
         (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: saveSshConfig }, t("save")),
-        sshRunning ? (0, import_react2.createElement)("button", { style: { ...styles.smallBtn, color: COLOR_ERR }, onClick: stopTunnel }, t("sshStop")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || sshStarting }, busy || sshStarting ? t("sshStarting") : t("sshStart")),
         (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: testSshConnection, disabled: sshTesting }, sshTesting ? t("sshTesting") : t("sshTest")),
-        sshEdit ? (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: () => setSshCfg(null) }, t("cancel")) : null
-      )
+        sshEdit ? (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: () => {
+          setSshCfg(null);
+          if (!sshMode) setPendingMode(null);
+        } }, t("cancel")) : null
+      ),
+      (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("sshStartHint"))
     )
   );
   const [notifyEdit, setNotifyEdit] = (0, import_react2.useState)(null);
@@ -3438,7 +3472,7 @@ function PocketSettingsTab({ rpcCall, t }) {
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
         (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("wanAccess")),
-        publicRunning ? (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: stopTunnel }, t("stopTunnel")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t("opening") : t("enable"))
+        publicRunning ? (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: stopTunnel }, t("stopTunnel")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t("opening") : fmt(t, "startChannel", { channel: channelLabel(willStartMode) }))
       ),
       tunnelStarting ? (0, import_react2.createElement)(
         "div",
@@ -3462,6 +3496,8 @@ function PocketSettingsTab({ rpcCall, t }) {
         (0, import_react2.createElement)(
           "div",
           { style: { marginTop: 6 } },
+          // 选中了通道但还没保存：明确告知"点开始会先保存并启动哪条通道"，不再默默开成另一条
+          pendingModeHint ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, pendingModeHint) : null,
           // 刚保存固定域名但当前连接仍是随机域名：需关闭后重新开启才生效
           namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? "") ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedTakeEffect")) : null,
           // 固定域名：已保存摘要 + 修改入口（非编辑态）
@@ -3512,7 +3548,10 @@ function PocketSettingsTab({ rpcCall, t }) {
               "div",
               { style: { marginTop: 6, display: "flex", gap: 8 } },
               (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: saveNamedTunnel }, t("save")),
-              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => setTunnelCfg(null) }, t("cancel"))
+              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => {
+                setTunnelCfg(null);
+                if (!namedMode) setPendingMode(null);
+              } }, t("cancel"))
             ),
             (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("namedHow")),
             (0, import_react2.createElement)("div", { style: { marginTop: 2, fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("namedSecurity")),
