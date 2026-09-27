@@ -1,16 +1,17 @@
-// 通行密钥 HTTP 集成回归测试（task-13：D-1 / D-2 / D-3）。
+// 通行密钥 HTTP 集成回归测试（task-13：D-1 / D-2 / D-3；task-16：WS 同形状 fail-open）。
 //
 // 只测「代理层」的行为：自建假上游 + 最小软件认证器，**不 import 其它测试文件**
 // （import 一个 *.test.js 会把它的用例也跑一遍）。每个用例一个临时 DSH_HOME。
 //
-// 对应三处修复：
+// 对应修复：
 //   D-1 非 HTTPS 上下文（X-Forwarded-Proto: http）的注册必须被拒，且不得下发设备 cookie；
 //   D-2 存储写失败的 fs 异常（含绝对路径）不得回给客户端，原文只进服务端日志；
-//   D-3 受保护 Host 上宿主 getToken() 返回空值时必须 fail closed（401，不落上游）。
+//   D-3 受保护 Host 上宿主 getToken() 返回空值时必须 fail closed（HTTP 与 WS 两条入口一致）。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
+import { connect } from 'node:net';
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -146,15 +147,67 @@ function loginWithPin(port, hostHeader, pin) {
   });
 }
 
+/** 假上游：记录普通请求与 WS upgrade（upgrade 计数用来证明「没有透传上游」）。 */
 async function fakeUpstream() {
   const seen = [];
+  const upgrades = [];
   const server = createServer((req, res) => {
     seen.push({ host: req.headers.host, path: req.url });
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end(`path=${req.url}`);
   });
+  // 真的完成一次 WS 握手：这样「上游 upgrade 计数 === 0」才是可观测的事实，
+  // 而不是「上游本来就不支持 upgrade，所以永远数不到」。
+  server.on('upgrade', (req, socket) => {
+    upgrades.push({ host: req.headers.host, path: req.url });
+    // 客户端断开 → 代理会 destroy 上游 socket，对端可能收到 RST：这里必须吞掉 error，
+    // 否则未处理的 'error' 事件会以未捕获异常的形式把整个测试进程打挂。
+    socket.on('error', () => {});
+    socket.on('close', () => {});
+    const key = String(req.headers['sec-websocket-key'] ?? '');
+    const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+      + `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+  });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  return { port: server.address().port, seen, server };
+  return { port: server.address().port, seen, upgrades, server };
+}
+
+/** 裸 WS 握手：返回客户端看到的状态行（不发掩码帧，够判 401/101 即可）。 */
+function wsUpgrade(port, hostHeader, { cookie = null, path = '/api/events.mux', token = null } = {}) {
+  const target = token ? `${path}?token=${encodeURIComponent(token)}` : path;
+  return new Promise((resolve) => {
+    let buf = '';
+    let settled = false;
+    let timer = null;
+    const sock = connect(port, '127.0.0.1', () => {
+      sock.write(
+        `GET ${target} HTTP/1.1\r\nHost: ${hostHeader}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`
+        + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n'
+        + (cookie ? `Cookie: ${cookie}\r\n` : '')
+        + '\r\n',
+      );
+    });
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      sock.destroy();
+      resolve({ statusLine: buf.split('\r\n')[0] ?? '', raw: buf });
+    };
+    sock.on('data', (c) => {
+      buf += c.toString('utf8');
+      if (buf.includes('\r\n\r\n')) settle();
+    });
+    sock.on('close', settle);
+    // 拒绝路径的收尾是 write + destroy()，对端可能在响应字节到达前就被 RST：
+    // 这里按「连接关闭」处理，用已收到的字节判定 —— 拿不到状态行时断言会明确失败。
+    sock.on('error', () => settle());
+    // 上游被透传但迟迟不回 101 时，别把用例挂死：超时按「没收到状态行」处理
+    timer = setTimeout(settle, 1500);
+  });
 }
 
 /** 起一套「固定域名通道 + 通行密钥」的代理（临时 HOME + 假上游 + 日志收集）。 */
@@ -371,6 +424,43 @@ test('D-3 对照：PIN 配置正常时，未认证请求仍然拿登录页 / reg
     assert.equal(session !== null, true);
     const ok = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerBegin, {}, { cookie: session });
     assert.equal(ok.status, 200, '登录后正常注册');
+  } finally {
+    await f.close();
+  }
+});
+
+// ---------- task-16：WS upgrade 同形状 fail-open ----------
+
+test('task-16：受保护 Host + 空 token 的 WS upgrade → 401 且上游收到 0 个 upgrade（HTTP 与 WS 两条入口一致）', async () => {
+  const f = await fixture({ getToken: () => null });
+  try {
+    // 1) 空 token（受保护 Host 拿不到 PIN）→ 客户端拿到 401，握手绝不透传上游
+    const denied = await wsUpgrade(f.proxy.port, DOMAIN);
+    assert.match(denied.statusLine, /^HTTP\/1\.1 401 /, `空 token 必须 401，实际：${JSON.stringify(denied.statusLine)}`);
+    assert.equal(f.upstream.upgrades.length, 0, '上游不得收到任何 WS upgrade');
+    assert.equal(f.upstream.seen.length, 0, '上游不得收到任何普通请求');
+    assert.ok(f.logs.some((l) => /no PIN configured — refusing ws upgrade/.test(l)), '日志记录 fail closed 原因');
+  } finally {
+    await f.close();
+  }
+});
+
+test('task-16 对照：非空 token 时 WS 行为逐字不变（校验失败仍 401，校验通过仍 101 且上游确实收到 upgrade）', async () => {
+  const f = await fixture();
+  try {
+    // 1) 非空 token + 错误的 ?token= → 仍走原来的 401 分支（日志是 bad ws ?token=，不是 no PIN）
+    const badGuess = await wsUpgrade(f.proxy.port, DOMAIN, { token: '00000000' });
+    assert.match(badGuess.statusLine, /^HTTP\/1\.1 401 /, `错误密码仍 401，实际：${JSON.stringify(badGuess.statusLine)}`);
+    assert.equal(f.upstream.upgrades.length, 0, '校验失败不透传');
+    assert.ok(f.logs.some((l) => /bad ws \?token=/.test(l)), '走的是原有分支（日志可区分）');
+    assert.equal(f.logs.some((l) => /no PIN configured/.test(l)), false, '不应误入空 token 分支');
+
+    // 2) 非空 token + 合法会话 cookie → 正常升级到上游（证明上面的 0 是「被拦住」而不是「数不到」）
+    const { session } = await loginWithPin(f.proxy.port, DOMAIN, PIN);
+    const ok = await wsUpgrade(f.proxy.port, DOMAIN, { cookie: session });
+    assert.match(ok.statusLine, /^HTTP\/1\.1 101 /, `合法会话应升级成功，实际：${JSON.stringify(ok.statusLine)}`);
+    assert.equal(f.upstream.upgrades.length, 1, '上游确实收到了这一次 upgrade');
+    assert.equal(f.upstream.upgrades[0].path, '/api/events.mux', '路径原样透传');
   } finally {
     await f.close();
   }
