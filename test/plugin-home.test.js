@@ -400,11 +400,12 @@ async function mountSettingsTab({ status, push = null, passkey = null, rpc = () 
   assert.equal(loadedModule.id, 'dsh-pocket', '打包产物模块 id 固定');
   const mod = loadedModule.factory((id) => {
     if (id === 'react') return react.api;
-    // 移动端组件用的图标（只在这些组件内部用到，本测试不渲染它们）
-    if (id === '@deepseek-ai/dsh-client-ui-primitives') {
-      const icon = () => null;
-      return { IconPanelLeftOutline16: icon, IconFolderOpenOutline16: icon, IconDownloadOutline16: icon };
-    }
+    // 图标已改为 client/mobile/icons.tsx 自带内联 SVG：这里**故意不再提供任何图标导出**。
+    // 之前这个桩恰好提供了 IconPanelLeftOutline16 等三个名字，而真实
+    // @deepseek-ai/dsh-client-ui-primitives（DSH 0.1.7-rc.2）根本没有这些带 16 后缀的导出 ——
+    // 桩把"引用了不存在的导出 → undefined → React #130 → 槽位崩溃"的真实故障掩盖了。
+    // 现在若还有人从该包导入图标，渲染时会拿到 undefined，测试必须失败。
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return {};
     throw new Error(`unexpected require("${id}")`);
   });
 

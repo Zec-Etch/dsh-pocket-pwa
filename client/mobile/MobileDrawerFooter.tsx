@@ -1,5 +1,5 @@
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconDownloadOutline16, IconPanelLeftOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconDownload, IconPanelLeft } from './icons.tsx'
 import { NS } from './locales.ts'
 
 /** Full props for the sidebar footer action entry. */
@@ -35,7 +35,7 @@ export function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSide
         title={t('files')}
         onClick={openExplorer}
       >
-        <IconPanelLeftOutline16 size={14} />
+        <IconPanelLeft size={14} />
         <span>{t('files')}</span>
       </button>
       <button
@@ -48,7 +48,7 @@ export function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSide
           if (sessionId !== undefined) downloadSessionLog(sessionId)
         }}
       >
-        <IconDownloadOutline16 size={14} />
+        <IconDownload size={14} />
         <span>{t('sessionLog')}</span>
       </button>
     </div>

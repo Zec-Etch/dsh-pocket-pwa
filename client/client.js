@@ -212,8 +212,30 @@ function redactStatus(s) {
   };
 }
 
+// client/mobile/icons.tsx
+function baseProps(size) {
+  return {
+    width: size,
+    height: size,
+    viewBox: "0 0 16 16",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.4,
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  };
+}
+function IconPanelLeft({ size = 16 }) {
+  return /* @__PURE__ */ React.createElement("svg", { ...baseProps(size) }, /* @__PURE__ */ React.createElement("rect", { x: "2.5", y: "3.5", width: "11", height: "9", rx: "1.5" }), /* @__PURE__ */ React.createElement("path", { d: "M6.5 3.5v9" }));
+}
+function IconFolderOpen({ size = 16 }) {
+  return /* @__PURE__ */ React.createElement("svg", { ...baseProps(size) }, /* @__PURE__ */ React.createElement("path", { d: "M2.5 5.2a1 1 0 0 1 1-1h2.9l1.2 1.5h4.9a1 1 0 0 1 1 1v.8" }), /* @__PURE__ */ React.createElement("path", { d: "M2.5 5.2v6.1a1 1 0 0 0 1 1h8.6a1 1 0 0 0 1-1l.9-4.3H4.3a1 1 0 0 0-1 .8z" }));
+}
+function IconDownload({ size = 16 }) {
+  return /* @__PURE__ */ React.createElement("svg", { ...baseProps(size) }, /* @__PURE__ */ React.createElement("path", { d: "M8 3v6.3" }), /* @__PURE__ */ React.createElement("path", { d: "M5.6 7.4 8 9.8l2.4-2.4" }), /* @__PURE__ */ React.createElement("path", { d: "M3.5 12.6h9" }));
+}
+
 // client/mobile/MobileNavToggle.tsx
-var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 function MobileNavToggle({ toggleSidebar, t }) {
   const toggleExplorer = () => {
     const frame = document.querySelector('[data-mobile-nav="frame"]');
@@ -233,7 +255,7 @@ function MobileNavToggle({ toggleSidebar, t }) {
       title: t("open"),
       onClick: () => toggleSidebar()
     },
-    /* @__PURE__ */ React.createElement(import_dsh_client_ui_primitives.IconPanelLeftOutline16, { size: 16 })
+    /* @__PURE__ */ React.createElement(IconPanelLeft, { size: 16 })
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -243,13 +265,12 @@ function MobileNavToggle({ toggleSidebar, t }) {
       title: t("files"),
       onClick: toggleExplorer
     },
-    /* @__PURE__ */ React.createElement(import_dsh_client_ui_primitives.IconFolderOpenOutline16, { size: 16 })
+    /* @__PURE__ */ React.createElement(IconFolderOpen, { size: 16 })
   ));
 }
 
 // client/mobile/MobileNavOverlay.tsx
 var import_react = require("react");
-var import_dsh_client_ui_primitives2 = require("@deepseek-ai/dsh-client-ui-primitives");
 
 // client/mobile/nav-targets.mjs
 var DRAWER_SELECTOR = '[data-mobile-nav="frame"] > :first-child';
@@ -471,12 +492,11 @@ function MobileNavOverlay({ toggleSidebar, t }) {
       title: t("open"),
       onClick: () => toggleSidebar()
     },
-    /* @__PURE__ */ React.createElement(import_dsh_client_ui_primitives2.IconPanelLeftOutline16, { size: 18 })
+    /* @__PURE__ */ React.createElement(IconPanelLeft, { size: 18 })
   ));
 }
 
 // client/mobile/MobileDrawerFooter.tsx
-var import_dsh_client_ui_primitives3 = require("@deepseek-ai/dsh-client-ui-primitives");
 function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSidebar, t }) {
   const sessionId = useSessions((state) => state.current);
   const openExplorer = () => {
@@ -492,7 +512,7 @@ function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSidebar, t 
       title: t("files"),
       onClick: openExplorer
     },
-    /* @__PURE__ */ React.createElement(import_dsh_client_ui_primitives3.IconPanelLeftOutline16, { size: 14 }),
+    /* @__PURE__ */ React.createElement(IconPanelLeft, { size: 14 }),
     /* @__PURE__ */ React.createElement("span", null, t("files"))
   ), /* @__PURE__ */ React.createElement(
     "button",
@@ -506,7 +526,7 @@ function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSidebar, t 
         if (sessionId !== void 0) downloadSessionLog(sessionId);
       }
     },
-    /* @__PURE__ */ React.createElement(import_dsh_client_ui_primitives3.IconDownloadOutline16, { size: 14 }),
+    /* @__PURE__ */ React.createElement(IconDownload, { size: 14 }),
     /* @__PURE__ */ React.createElement("span", null, t("sessionLog"))
   ));
 }
