@@ -9,6 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import {
   createDecipheriv,
   createPrivateKey,
@@ -34,6 +35,24 @@ import { WEBHOOK_PRESETS, buildWebhookRequest, dingtalkSign, sendWebhook } from 
 
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const ping = 'https://fcm.googleapis.com/fcm/send/abc123';
+
+/**
+ * 测试自己实现的 RFC 2047 encoded-word 解码（只处理 `=?UTF-8?B?…?=`，独立于 lib 的编码实现）。
+ * §6.2：相邻 encoded-word 之间的空白在解码时必须丢弃，否则长标题会被解出多余空格。
+ */
+function decodeHeaderWords(raw) {
+  const text = String(raw ?? '');
+  return text
+    .replace(/\?=\s+=\?UTF-8\?B\?/gi, '?==?UTF-8?B?')
+    .replace(/=\?UTF-8\?B\?([^?]*)\?=/gi, (_match, payload) => Buffer.from(payload, 'base64').toString('utf8'));
+}
+
+/** 头值必须是可打印 ASCII（HTTP 头 = ByteString；undici 对非 ASCII 直接抛错）。 */
+function assertHeaderValuesAscii(headers) {
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    assert.match(String(value), /^[\x20-\x7E]*$/, `头 ${name} 必须只含可打印 ASCII，实际 ${JSON.stringify(value)}`);
+  }
+}
 
 /** 造一条「浏览器侧」订阅：返回测试自己保管的私钥 + 浏览器会发出去的 JSON 形状。 */
 function makeSubscription(endpoint = ping) {
@@ -509,10 +528,13 @@ test('webhook：6 个 preset 的请求形状', () => {
 
   const ntfy = buildWebhookRequest({ ...base, preset: 'ntfy' });
   assert.equal(ntfy.body, '任务完成\n会话结束');
-  assert.equal(ntfy.headers.Title, '任务完成');
+  // 中文标题用 RFC 2047 encoded-word 承载（ntfy 官方文档支持的写法）：头是纯 ASCII，解码后仍是原文
+  assert.match(ntfy.headers.Title, /^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/);
+  assert.equal(decodeHeaderWords(ntfy.headers.Title), '任务完成');
   assert.equal(ntfy.headers.Priority, 'high');
   assert.equal(ntfy.headers.Click, 'https://x/y');
   assert.match(ntfy.headers['content-type'], /text\/plain/);
+  assertHeaderValuesAscii(ntfy.headers);
   // 不给 tags 时不应多出 Tags 头
   assert.equal(Object.prototype.hasOwnProperty.call(ntfy.headers, 'Tags'), false);
 
@@ -640,4 +662,230 @@ test('三个模块 import 时零副作用（不联网、不读盘）', async () 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ---------------------------------------------------------------- 头安全（issue：ntfy + 中文标题）
+
+/** 起一个真实 http 服务收 webhook：必须用真 undici fetch 发，才能证明不再抛 ByteString。 */
+async function startWebhookSink() {
+  const hits = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      hits.push({ method: req.method, url: req.url, headers: { ...req.headers }, body: Buffer.concat(chunks).toString('utf8') });
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end('{"errcode":0,"errmsg":"ok"}');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  return {
+    hits,
+    url: (path = '/hook') => `http://127.0.0.1:${port}${path}`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+test('webhook：ntfy + 中文标题（生产默认形态）必须真的发得出去（回归：ByteString）', async () => {
+  const sink = await startWebhookSink();
+  try {
+    // 生产默认标题就是中文（lib/notify-hook.mjs 的 DEFAULT_TITLE）
+    const result = await sendWebhook({
+      preset: 'ntfy',
+      url: sink.url('/topic'),
+      title: 'DSH 任务完成',
+      body: '一个任务跑完了 | a task finished',
+      link: 'https://pocket.invalid/会话/1',
+    });
+    assert.equal(result.ok, true, `中文标题必须能发出请求，实际 ${JSON.stringify(result)}`);
+    assert.equal(result.status, 200);
+    assert.equal(result.reason, undefined, '成功时保持冻结的三字段形状');
+    assert.equal(sink.hits.length, 1, 'mock 必须收到 1 次请求（缺陷时是 0 次）');
+
+    const hit = sink.hits[0];
+    assert.equal(hit.method, 'POST');
+    assert.equal(hit.body, 'DSH 任务完成\n一个任务跑完了 | a task finished', '中文正文逐字节完好');
+    assert.equal(hit.headers['content-type'], 'text/plain; charset=utf-8');
+    assert.equal(hit.headers.priority, 'high');
+    // 非 ASCII 的 Click 会被百分号编码，仍然是合法头值
+    assert.equal(hit.headers.click, 'https://pocket.invalid/%E4%BC%9A%E8%AF%9D/1');
+    // Title 头必须是纯 ASCII（ByteString），且解码后能还原成中文标题
+    assertHeaderValuesAscii(hit.headers);
+    assert.equal(decodeHeaderWords(hit.headers.title), 'DSH 任务完成', 'Title 头解码后必须等于原标题（手机端能看到中文）');
+  } finally {
+    await sink.close();
+  }
+});
+
+test('webhook：ntfy ASCII 标题仍带 Title 头（回归）', async () => {
+  const sink = await startWebhookSink();
+  try {
+    const result = await sendWebhook({ preset: 'ntfy', url: sink.url('/topic'), title: 'DSH task done', body: 'a task finished' });
+    assert.equal(result.ok, true);
+    assert.equal(sink.hits.length, 1);
+    assert.equal(sink.hits[0].headers.title, 'DSH task done');
+    assert.equal(sink.hits[0].body, 'DSH task done\na task finished');
+  } finally {
+    await sink.close();
+  }
+});
+
+test('webhook：6 个 preset + 中文标题都真的发得出去（真实 undici）', async () => {
+  const sink = await startWebhookSink();
+  const cases = [
+    { preset: 'generic', path: '/hook' },
+    { preset: 'wecom', path: '/hook?token=t' },
+    { preset: 'dingtalk', path: '/hook?token=t', secret: 'vrfy-dingtalk-secret' },
+    { preset: 'feishu', path: '/hook' },
+    { preset: 'ntfy', path: '/topic' },
+    { preset: 'bark', path: '/bark' },
+  ];
+  try {
+    for (const c of cases) {
+      const before = sink.hits.length;
+      const result = await sendWebhook({
+        preset: c.preset,
+        url: sink.url(c.path),
+        secret: c.secret,
+        title: 'DSH 任务完成',
+        body: '会话 abc 结束',
+        link: 'https://pocket.invalid/',
+      });
+      assert.equal(result.ok, true, `${c.preset} 应发送成功，实际 ${JSON.stringify(result)}`);
+      assert.equal(sink.hits.length - before, 1, `${c.preset} 应恰好发出 1 次请求`);
+      const hit = sink.hits[before];
+      assert.match(String(hit.headers['content-type']), /^(application\/json|text\/plain)/, `${c.preset} content-type`);
+      assert.ok(hit.body.includes('DSH 任务完成'), `${c.preset} 报文里要带上中文标题`);
+      assertHeaderValuesAscii(hit.headers);
+      if (c.preset === 'ntfy') {
+        assert.equal(decodeHeaderWords(hit.headers.title), 'DSH 任务完成', 'ntfy Title 头解码后等于中文标题');
+      }
+    }
+  } finally {
+    await sink.close();
+  }
+});
+
+test('webhook：ntfy 头加固 —— Title/Priority/Tags/Click 不注入、不抛', () => {
+  const request = buildWebhookRequest({
+    preset: 'ntfy',
+    url: 'https://ntfy.sh/topic',
+    title: '中文标题',
+    body: 'b',
+    priority: 'high\r\nX-Evil: 1',
+    tags: ['ok', '中文标签', 'bad\r\nhack'],
+    link: 'https://x/中文',
+  });
+  assert.equal(decodeHeaderWords(request.headers.Title), '中文标题', '中文标题编码成 encoded-word 后可逐字还原');
+  assert.equal(request.headers.Priority, 'high', 'CRLF 注入被白名单挡掉，回退默认优先级');
+  assert.equal(request.headers.Tags, 'ok', '非 ASCII / 控制字符 tag 被剔除');
+  assert.equal(request.headers.Click, 'https://x/%E4%B8%AD%E6%96%87', 'Click 非 ASCII 百分号编码');
+  assert.equal(/[\r\n]/.test(JSON.stringify(request.headers)), false);
+  assertHeaderValuesAscii(request.headers);
+  // 白名单内的优先级原样保留（大小写归一）
+  assert.equal(buildWebhookRequest({ preset: 'ntfy', url: 'https://ntfy.sh/t', priority: 'MAX' }).headers.Priority, 'max');
+  assert.equal(buildWebhookRequest({ preset: 'ntfy', url: 'https://ntfy.sh/t', priority: '3' }).headers.Priority, '3');
+  assert.equal(buildWebhookRequest({ preset: 'ntfy', url: 'https://ntfy.sh/t' }).headers.Priority, 'high');
+  // 控制字符标题：剔掉控制字符后仍是纯 ASCII，可以安全发头；正文（body）里的换行不算头注入
+  const injected = buildWebhookRequest({ preset: 'ntfy', url: 'https://ntfy.sh/t', title: 'ok\r\nX-Evil: 1', body: 'b' });
+  assert.equal(injected.headers.Title, 'okX-Evil: 1');
+  assert.equal(/\r|\n/.test(injected.headers.Title), false);
+  assert.equal(injected.body, 'ok\r\nX-Evil: 1\nb', '正文原样保留');
+  // 只有控制字符的标题 → 不发 Title 头，也不报错
+  const blank = buildWebhookRequest({ preset: 'ntfy', url: 'https://ntfy.sh/t', title: '\r\n', body: 'b' });
+  assert.equal(Object.prototype.hasOwnProperty.call(blank.headers, 'Title'), false);
+  // bark 的 group 在 JSON body 里，不受头安全限制（UTF-8 合法）
+  assert.equal(JSON.parse(buildWebhookRequest({ preset: 'bark', url: 'https://api.day.app/k', title: 't', tags: ['中文'] }).body).group, '中文');
+  // 非 ASCII URL 会被百分号编码（ntfy 主题名常是中文）
+  const chineseUrl = buildWebhookRequest({ preset: 'ntfy', url: 'https://ntfy.sh/我的主题', title: 't' });
+  assert.equal(chineseUrl.url, 'https://ntfy.sh/%E6%88%91%E7%9A%84%E4%B8%BB%E9%A2%98');
+});
+
+test('webhook：ntfy 长中文标题切成多段 encoded-word（每段 ≤75 字符，整体可还原）', async () => {
+  const longTitle = '这是一个很长的中文会话标题用来验证多段编码词能不能被正确解码还原成完整标题';
+  const request = buildWebhookRequest({ preset: 'ntfy', url: 'https://ntfy.sh/topic', title: longTitle, body: 'b' });
+  const words = request.headers.Title.split(' ');
+  assert.ok(words.length > 1, `长标题必须切成多段 encoded-word，实际 ${words.length} 段`);
+  for (const word of words) {
+    assert.match(word, /^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/);
+    assert.ok(word.length <= 75, `单个 encoded-word 不得超过 75 字符，实际 ${word.length}`);
+  }
+  assert.equal(decodeHeaderWords(request.headers.Title), longTitle, '多段编码词整体解码必须逐字等于原标题');
+  assertHeaderValuesAscii(request.headers);
+
+  // 端到端：真实 undici 发出去，mock 收到的头仍是合法 ASCII 且可还原
+  const sink = await startWebhookSink();
+  try {
+    const result = await sendWebhook({ preset: 'ntfy', url: sink.url('/topic'), title: longTitle, body: 'b' });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(sink.hits.length, 1);
+    assertHeaderValuesAscii(sink.hits[0].headers);
+    assert.equal(decodeHeaderWords(sink.hits[0].headers.title), longTitle);
+  } finally {
+    await sink.close();
+  }
+});
+
+test('webhook：非 ASCII 主题 URL 的请求真的发得出去', async () => {
+  const sink = await startWebhookSink();
+  try {
+    const result = await sendWebhook({ preset: 'ntfy', url: sink.url('/我的主题'), title: 'DSH task done' });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(sink.hits.length, 1);
+    assert.equal(sink.hits[0].url, '/%E6%88%91%E7%9A%84%E4%B8%BB%E9%A2%98');
+  } finally {
+    await sink.close();
+  }
+});
+
+test('webhook：请求构造错误不再被报成「网络错误」', async () => {
+  // undici 在头值不是 ByteString 时抛的就是这个（无 cause 的 TypeError）
+  const byteStringError = new TypeError(
+    'Cannot convert argument to a ByteString because the character at index 4 has a value of 20219 which is greater than 255.',
+  );
+  const constructed = await sendWebhook(
+    { preset: 'ntfy', url: 'https://ntfy.sh/topic', title: 'DSH 任务完成' },
+    { fetchImpl: async () => { throw byteStringError; } },
+  );
+  assert.equal(constructed.ok, false);
+  assert.equal(constructed.status, 0);
+  assert.equal(constructed.reason, 'request', '构造/编码错误应单独分类');
+  assert.match(constructed.error, /请求构造失败/);
+  assert.equal(/网络错误/.test(constructed.error), false, '不能再说成网络错误');
+
+  // 真正的网络失败：连一个已关闭的本地端口（undici 抛 TypeError: fetch failed，cause=ECONNREFUSED）
+  const sink = await startWebhookSink();
+  const deadUrl = sink.url('/hook');
+  await sink.close();
+  const offline = await sendWebhook({ preset: 'generic', url: deadUrl, title: 't', body: 'b' }, { timeoutMs: 5000 });
+  assert.equal(offline.ok, false);
+  assert.equal(offline.reason, 'network', `真实网络失败仍要归为 network，实际 ${JSON.stringify(offline)}`);
+  assert.match(offline.error, /网络错误/);
+
+  // 调用方自带的头非法 → request 报错，且不发请求（不静默丢弃鉴权头）
+  let called = 0;
+  const badHeader = await sendWebhook(
+    { preset: 'generic', url: 'https://example.com/hook', title: 't', headers: { Authorization: 'Bearer 中文令牌' } },
+    { fetchImpl: async () => { called += 1; return { status: 200 }; } },
+  );
+  assert.equal(badHeader.ok, false);
+  assert.equal(badHeader.reason, 'request');
+  assert.match(badHeader.error, /Authorization/);
+  assert.equal(called, 0, '非法头必须在发请求前就被拦下');
+});
+
+test('webhook：失败结果的 reason 分类（http / api-error / timeout / config）', async () => {
+  const http500 = await sendWebhook({ preset: 'generic', url: 'https://example.com/h', title: 't' }, { fetchImpl: async () => ({ status: 500, text: async () => 'boom' }) });
+  assert.equal(http500.reason, 'http');
+  const apiError = await sendWebhook({ preset: 'wecom', url: 'https://example.com/h', title: 't' }, { fetchImpl: async () => ({ status: 200, text: async () => '{"errcode":40013,"errmsg":"invalid appid"}' }) });
+  assert.equal(apiError.reason, 'api-error');
+  const config = await sendWebhook({ url: '' });
+  assert.equal(config.reason, 'config');
+  const hang = (url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+  const timedOut = await sendWebhook({ preset: 'generic', url: 'https://example.com/h', title: 't' }, { fetchImpl: hang, timeoutMs: 50 });
+  assert.equal(timedOut.reason, 'timeout');
+  assert.equal(timedOut.status, 0);
 });
