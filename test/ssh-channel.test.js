@@ -15,6 +15,8 @@ import {
   toTunnelConfig,
   DEFAULT_SSH_PORT,
   DEFAULT_REMOTE_BIND_PORT,
+  STDERR_TAIL_LINES,
+  STDERR_TAIL_LINE_MAX,
 } from '../lib/ssh-channel.mjs';
 
 /** 假子进程：EventEmitter + stdout/stderr 流 + kill。 */
@@ -217,4 +219,147 @@ test('createSshChannel：非法用户名（空白/含 @）由 ssh 核心拒绝�
   });
   assert.throws(() => ch.start(), /空白|user/);
   assert.equal(ch.status().state, 'failed', '配置错误必须同时可见（抛错 + 状态）');
+});
+
+// ---------- O1 / O2 / O3：dev-env 独立验证报告的三条观察项 ----------
+
+/** 极简假核心（createTunnelImpl 注入）：用来构造「核心自己报 connected」的场景。 */
+function fakeTunnelCore({ evidence = undefined, message = '' } = {}) {
+  return (opts) => ({
+    start() {
+      opts.onState('starting', { message: 'starting' });
+      opts.onState('connected', { ...(message === undefined ? {} : { message }), ...(evidence ? { evidence } : {}) });
+    },
+    stop() { opts.onState('stopped', { message: '已停止 | stopped' }); },
+    snapshot: () => ({
+      state: 'connected',
+      lastError: null,
+      target: { host: 'vps.example.com', user: 'u', port: 22, remote: '127.0.0.1:7788', local: '127.0.0.1:3081' },
+      attempts: 0,
+      nextRetryInMs: null,
+      stderrTail: [],
+    }),
+  });
+}
+
+test('O3：connected 但没有结构化证据（消息为空 / 无 stderr）→ evidence=null，不再误报 forward-ok', () => {
+  // 旧实现用 /graceMs|存活超过/.test(message) 反推：空消息会落进 else 分支 → 误报 forward-ok。
+  const ch = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'u' }),
+    getLocalPort: () => 3081,
+    createTunnelImpl: fakeTunnelCore({ message: '' }),
+  });
+  ch.start();
+  assert.equal(ch.status().state, 'connected');
+  assert.equal(ch.status().evidence, null, '空消息 + 无 stderr → 如实回 null');
+  ch.stop();
+
+  // 连 message 都没有（undefined）时同样是 null
+  const ch2 = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'u' }),
+    getLocalPort: () => 3081,
+    createTunnelImpl: fakeTunnelCore({ message: undefined }),
+  });
+  ch2.start();
+  assert.equal(ch2.status().state, 'connected');
+  assert.equal(ch2.status().evidence, null, '缺 message → null');
+  ch2.stop();
+
+  // 核心若显式给出结构化 evidence，则原样采用（未来核心版本可以这样接）
+  const ch3 = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'u' }),
+    getLocalPort: () => 3081,
+    createTunnelImpl: fakeTunnelCore({ message: '', evidence: 'grace' }),
+  });
+  ch3.start();
+  assert.equal(ch3.status().evidence, 'grace', '显式结构化字段优先');
+  ch3.stop();
+
+  // 观测层看不到 stderr（如 fd 桥接），但核心把就绪行原文交给了我们：
+  // 用 lib/ssh.mjs 自己的分类器判定 → 仍然是 forward-ok（不是靠人话正则）
+  const ch4 = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'u' }),
+    getLocalPort: () => 3081,
+    createTunnelImpl: fakeTunnelCore({ message: FORWARD_OK_LINE }),
+  });
+  ch4.start();
+  assert.equal(ch4.status().evidence, 'forward-ok', '核心消息经分类器判定为就绪行');
+  ch4.stop();
+
+  // 有消息但不含就绪行 → 'grace'（非证据型 connected，不做过度声明）
+  const ch5 = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'u' }),
+    getLocalPort: () => 3081,
+    createTunnelImpl: fakeTunnelCore({ message: 'ssh 存活超过 2500ms（未启用 -v 就绪行）' }),
+  });
+  ch5.start();
+  assert.equal(ch5.status().evidence, 'grace', '无就绪行但有消息 → grace');
+  ch5.stop();
+});
+
+test('O2：-v 下 lastError 优先展示干净的 forward-fail 行（debug1 行被替换），拿不到干净行则保持原样', async () => {
+  const { spawnImpl, children } = fakeSpawn();
+  const ch = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'dsh' }),
+    getLocalPort: () => 3081,
+    spawnImpl,
+    reconnect: false,
+    log: () => {},
+  });
+  ch.start();
+  // 真机顺序：debug1 行先到（分类器据此 settleFatal），干净那行随后到
+  children[0].stderr.emit('data', `${FORWARD_FAIL_LINE.replace('Warning', 'debug1')}\n`);
+  await sleep(10);
+  const beforeClean = ch.status();
+  assert.equal(beforeClean.state, 'failed');
+  assert.match(beforeClean.lastError ?? '', /^debug1:/, '只有 debug 行时如实显示它（不编造文案）');
+
+  children[0].stderr.emit('data', `${FORWARD_FAIL_LINE}\n`);
+  const afterClean = ch.status();
+  assert.equal(
+    afterClean.lastError,
+    FORWARD_FAIL_LINE,
+    '干净行一到就替换展示（O2：用户该看到 Warning: remote port forwarding failed for listen port 7788）',
+  );
+  ch.stop();
+});
+
+test('O1：status 暴露 attempts / nextRetryInMs / stderrTail（限长）/ target（无私钥路径）', async () => {
+  const { spawnImpl, children } = fakeSpawn();
+  const keyPath = '~/.ssh/id_ed25519';
+  const ch = createSshChannel({
+    getConfig: () => ({ host: 'vps.example.com', user: 'dsh', keyPath, remoteBindPort: 8899 }),
+    getLocalPort: () => 3081,
+    spawnImpl,
+    log: () => {},
+  });
+  ch.start();
+  const st = ch.status();
+  assert.equal(st.attempts, 0, '首轮 attempts=0');
+  assert.equal(st.nextRetryInMs, null, '未在退避中');
+  assert.ok(Array.isArray(st.stderrTail), 'stderrTail 是数组');
+  assert.equal(st.target.host, 'vps.example.com');
+  assert.equal(st.target.user, 'dsh');
+  assert.equal(st.target.remote, '127.0.0.1:8899');
+  assert.equal(st.target.local, '127.0.0.1:3081');
+  assert.ok(!JSON.stringify(st).includes('id_ed25519'), 'status 不含私钥路径');
+  assert.ok(!JSON.stringify(st).includes('keyPath'), 'status 不含 keyPath 字段');
+
+  // stderr 尾巴：限长（最多 STDERR_TAIL_LINES 行、每行 STDERR_TAIL_LINE_MAX 字符）
+  for (let i = 0; i < 20; i++) children[0].stderr.emit('data', `noise-line-${i}-${'x'.repeat(900)}\n`);
+  const st2 = ch.status();
+  assert.equal(st2.stderrTail.length, STDERR_TAIL_LINES, `最多 ${STDERR_TAIL_LINES} 行`);
+  assert.ok(st2.stderrTail.every((l) => l.length <= STDERR_TAIL_LINE_MAX), `每行最多 ${STDERR_TAIL_LINE_MAX} 字符`);
+  assert.match(st2.stderrTail[st2.stderrTail.length - 1], /noise-line-19/, '保留最近的行');
+
+  // 断线进入退避 → attempts / nextRetryInMs 有值，evidence 清空
+  children[0].stderr.emit('data', 'ssh: connect to host vps.example.com port 22: Connection timed out\n');
+  children[0].emit('exit', 255, null);
+  await sleep(20);
+  const st3 = ch.status();
+  assert.equal(st3.state, 'reconnecting');
+  assert.equal(st3.attempts, 1, '重连计数可见');
+  assert.ok(st3.nextRetryInMs > 0, '重连倒计时可见');
+  assert.equal(st3.evidence, null, '离开 connected 后不保留旧证据');
+  ch.stop();
 });

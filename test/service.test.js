@@ -992,6 +992,15 @@ test('SSH 通道（垂直）：startTunnel(mode=ssh) 用 ssh 反向隧道，不�
     assert.ok(!JSON.stringify(st).includes('"keyPath"'), 'status 不含 keyPath 字段');
     assert.equal(st.ssh.config.host, 'vps.example.com');
     assert.equal(st.ssh.config.remoteBindPort, 7788);
+    // O1（dev-env）：排障字段必须透出到 status().ssh
+    assert.equal(st.ssh.attempts, 0, 'attempts 透出（0=当前没有连续重试）');
+    assert.equal(st.ssh.nextRetryInMs, null, 'nextRetryInMs 透出（不在退避中为 null）');
+    assert.ok(Array.isArray(st.ssh.stderrTail), 'stderrTail 透出（数组）');
+    assert.equal(st.ssh.target.host, 'vps.example.com', 'target 透出');
+    assert.equal(st.ssh.target.user, 'dsh');
+    assert.equal(st.ssh.target.remote, '127.0.0.1:7788');
+    assert.equal(st.ssh.target.local, '127.0.0.1:3081');
+    assert.ok(!JSON.stringify(st.ssh.target).includes('keyPath'), 'target 里没有私钥路径');
 
     // 停止：ssh 进程被杀、状态回到 idle
     service.stopTunnel();
@@ -1024,13 +1033,83 @@ test('SSH 通道：远端端口被占（forwarding failed）→ startTunnel 立�
     const started = service.startTunnel();
     started.catch(() => {}); // 防未处理 rejection 噪音
     await new Promise((r) => setTimeout(r, 30));
+    // 真机顺序（-v 常开）：debug1 变体先到并触发 fatal，干净那行紧随其后
+    ssh.children[0].stderr.emit('data', `${SSH_FAIL_LINE.replace('Warning', 'debug1')}\n`);
     ssh.children[0].stderr.emit('data', `${SSH_FAIL_LINE}\n`);
     await assert.rejects(() => started, /forwarding failed|7788/, '远端端口占用必须如实报错');
     const st = await service.status();
     assert.equal(st.ssh.state, 'failed', '失败态可见（UI 不会显示已连接）');
     assert.match(String(st.ssh.lastError), /7788/);
+    // O2：展示层优先干净文案（不再是 debug1: 那条）
+    assert.equal(st.ssh.lastError, SSH_FAIL_LINE, 'lastError 用干净的 Warning 行');
+    assert.ok(!String(st.ssh.lastError).startsWith('debug1:'), '不再把 debug 文案给用户看');
+    assert.equal(st.ssh.evidence, null, '非 connected → evidence null');
+    assert.equal(st.ssh.running, false, 'failed 不是 running（不会误报已开启）');
+    // O1：失败现场必须能拿到 stderr 尾巴与目标
+    assert.ok(st.ssh.stderrTail.length >= 1, 'stderrTail 有内容（排障最有用的一条）');
+    assert.ok(st.ssh.stderrTail.some((l) => /7788/.test(l)), '尾巴里有端口 7788 那行');
+    assert.equal(st.ssh.target.host, 'vps.example.com');
     assert.equal(st.tunnelState.phase, 'error');
     assert.match(String(st.tunnelState.detail), /7788/);
+  } finally {
+    await service.dispose();
+    restore();
+  }
+});
+
+test('O1：重连态的 status().ssh 暴露 attempts / nextRetryInMs / stderrTail（dev-env 之前取到 undefined）', async () => {
+  const { home, restore } = withTempHome();
+  const settings = await import('../lib/settings.mjs');
+  const ssh = fakeSshSpawn();
+  const internals = stubInternals();
+  internals.sshSpawnImpl = ssh.spawnImpl;
+  settings.setTunnelMode('ssh');
+  settings.setSshHost('vps.example.com');
+  settings.setSshUser('dsh');
+
+  const service = createPocketService({
+    dshPort: 3080, port: 3081, home, internals,
+    getSshConfig: () => settings.sshChannelConfig(),
+    getTunnelConfig: () => ({ mode: settings.tunnelMode() }),
+    log: { info() {}, warn() {}, error() {}, log() {} },
+  });
+  try {
+    const started = service.startTunnel();
+    started.catch(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    // 网络类错误（非致命）→ 退避重连；此时 attempts / nextRetryInMs 才有意义
+    ssh.children[0].stderr.emit('data', 'ssh: connect to host vps.example.com port 22: Connection timed out\n');
+    ssh.children[0].emit('exit', 255, null);
+    await new Promise((r) => setTimeout(r, 30));
+    const st = await service.status();
+    assert.equal(st.ssh.state, 'reconnecting');
+    assert.equal(st.ssh.running, true, '重连中仍算在跑（UI 显示倒计时）');
+    assert.equal(st.ssh.attempts, 1, 'attempts 透出');
+    assert.ok(st.ssh.nextRetryInMs > 0, 'nextRetryInMs 透出（前端可显示「N 秒后重连」）');
+    assert.ok(st.ssh.stderrTail.some((l) => /Connection timed out/.test(l)), 'stderrTail 透出失败原因');
+    assert.equal(st.ssh.evidence, null, '非 connected → evidence null');
+    assert.equal(st.ssh.target.remote, '127.0.0.1:7788');
+    // 契约一致性：这些字段同时在 /dsh-pocket 的只读 status 与 ssh.status RPC 里
+    // （同一 statusPayload；admin 通道复用同一 handler）
+    const conn = fakeCtxConnection();
+    installPocketRpc({ connection: conn }, {
+      service,
+      // 与 lib/index.js 同形：ssh 组由宿主注入
+      ssh: {
+        status: async ({ test } = {}) => {
+          const block = (await service.status()).ssh ?? null;
+          if (!test) return { ssh: block };
+          const probe = await service.testSshConnection();
+          return { ssh: (await service.status()).ssh ?? block, test: probe };
+        },
+      },
+      log: { error() {}, warn() {} },
+    });
+    const rpc = await conn.handler(POCKET_ENDPOINTS.sshStatus, {});
+    assert.equal(rpc.ok, true);
+    assert.equal(rpc.value.ssh.attempts, 1, 'ssh.status 也能拿到 attempts');
+    assert.ok(rpc.value.ssh.nextRetryInMs > 0, 'ssh.status 也能拿到 nextRetryInMs');
+    assert.ok(Array.isArray(rpc.value.ssh.stderrTail), 'ssh.status 也能拿到 stderrTail');
   } finally {
     await service.dispose();
     restore();
