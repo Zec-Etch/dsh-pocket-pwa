@@ -66,33 +66,60 @@ curl -s -o /dev/null -w "3081:%{http_code}\n" http://127.0.0.1:3081/   # dsh-poc
 > （`mtimeMs` / `ctimeMs` / `size`，长度前缀拼接后再 sha1，取前 12 位）取哈希，**不是内容哈希**。
 > 结论：内容没变、只是重新打包（mtime 变了）rev 也会变；内容变了但元数据恰好没变则不会变。拿它当「内容指纹」会误判。
 
-正确做法是**逐字节比对**：把页面实际引用的那份 `client.js` 抓下来，看它是否包含本地文件的完整内容：
+正确做法是**逐字节比对**：把页面实际引用的那份 `client.js` 抓下来，看它是否包含本地文件的完整内容。
+请在**仓库根目录**执行（脚本按相对路径读 `client/client.js`）：
 
 ```sh
 node --input-type=module -e "
+const base = 'http://127.0.0.1:3080';
 const { readFileSync } = await import('node:fs');
 const local = readFileSync('client/client.js', 'utf8');
-const html = await (await fetch('http://127.0.0.1:3080/')).text();
+let html;
+try {
+  html = await (await fetch(base + '/')).text();
+} catch (err) {
+  console.log('连不上 ' + base + '（' + (err?.cause?.code ?? err?.message ?? err) + '）—— dsh web 没起来？'); process.exit(1);
+}
 const tokens = html.split(/[\s<>()\u0022\u0027]+/).filter((s) => s.length > 0); // 按空白/引号/尖括号切词（\u0022 是双引号、\u0027 是单引号，免得和 shell 的引号打架）
 const refs = [...new Set(tokens.filter((u) => u.includes('client.js') && u.includes('rev=') && u.includes('dsh-pocket')))];
-if (refs.length === 0) { console.log('页面里没有 dsh-pocket/client.js 引用 —— dsh web 没起来，或插件没加载成功'); process.exit(1); }
+if (refs.length === 0) { console.log('页面里没有 dsh-pocket/client.js 引用 —— 插件没加载成功？'); process.exit(1); }
 for (const ref of refs) {
-  const url = new URL(ref, 'http://127.0.0.1:3080/');
+  const url = new URL(ref, base + '/');
   const served = await (await fetch(url)).text();
   const hit = served.includes(local);
   console.log((hit ? 'OK   ' : 'MISS ') + url.pathname + url.search + '  served=' + served.length + 'B');
 }
-console.log('本地 client/client.js = ' + local.length + 'B；上面出现 OK 且路径含 dsh-pocket = 本地代码已生效');
+console.log('本地 client/client.js = ' + local.length + 'B；出现 OK 且路径含 dsh-pocket = 本地代码已生效');
 "
 ```
 
 说明：
 
-- 用 `includes` 而不是 `===`：DSH 会在 chunk 末尾追加一行 `//# sourceMappingURL=client.js.map?rev=…`；
+- 用 `includes` 而不是 `===`：DSH 会在 chunk 末尾追加一行 `//# sourceMappingURL=client.js.map?rev=…`，
+  所以 `served` 会比本地文件大几十字节（实测：本地 190338B → served 190391B）；
 - DSH 0.1.7-rc.2 的引用既可能是 `/plugins/dsh-pocket/client.js?rev=…`，也可能是 `/plugins/??dsh-pocket/client.js,…&rev=…`
   这种组合资源，所以脚本按「含 `client.js` + `rev=` + `dsh-pocket`」筛选，两种都能抓到；
 - **MISS = 页面加载的不是这份产物**：最常见就是改完 `client/` 忘了 `node client/build.mjs`，或者 dsh web 没重启成功
   （看 `/tmp/dsh-web-dev.log`）。这条比旧的 rev 比对更直接：它比的是内容本身。
+
+**这段脚本在哪些 shell 里能直接粘贴**（作者实测记录）：
+
+- **PowerShell 7（Windows）**：上面这段**实测通过**。实测输出（尺寸随版本变化，只看 OK/MISS）：
+  ```
+  OK   /plugins/dsh-pocket/client.js?rev=111111111111  served=190391B
+  本地 client/client.js = 190338B；出现 OK 且路径含 dsh-pocket = 本地代码已生效
+  ```
+  反例（服务器上还是旧产物时会打印，用于自检脚本本身）：`MISS /plugins/dsh-pocket/client.js?rev=…  served=…`；
+  dsh web 没跑时：`连不上 http://127.0.0.1:3080（ECONNREFUSED）—— dsh web 没起来？`（退出码 1）。
+- **bash / zsh**：同一行**按引号规则可直接用**——脚本体内没有 `$`、反引号或双引号，
+  双引号外层不会被提前闭合（`\s`、`\u0022`、`\u0027` 在双引号里按字面传递）。但作者只在 Windows PowerShell 下实测过，
+  这里如实标注；若你的 shell 在转义上较真，用下面的文件写法，任何 shell 都稳：
+
+  把 `-e "` 与结尾 `"` 之间的内容存成文件（例如仓库根目录的 `dev-check-client.mjs`），然后：
+
+  ```sh
+  node dev-check-client.mjs     # 用完删掉即可，不要提交
+  ```
 
 ## 四、换回 npm 官方版本
 

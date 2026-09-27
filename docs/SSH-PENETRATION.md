@@ -162,6 +162,8 @@ server {
 
 > 「访问协议 / 访问域名 / 访问端口」只影响**二维码和链接里拼出来的地址**，不改变隧道本身。
 > 选 `http` 时浏览器会把页面当作非安全上下文：PWA 安装、Web Push、通行密钥全部不可用（只能当降级通路）。
+> 具体到通知：**纯 http 地址收不到任何推送**（浏览器在非安全上下文里不给注册 Service Worker、也不给推送订阅），
+> 想收通知就用本文档的 **HTTPS 域名**打开设置页再点「注册本机订阅」——换了地址（http → https）要**重新订阅一次**，订阅按站点保存。
 
 ---
 
@@ -309,7 +311,7 @@ Register-ScheduledTask -TaskName 'dsh-pocket-ssh-tunnel' -Action $action -Trigge
 | 域名证书没签下来 | 浏览器证书错误 / `curl` 报证书失败 | DNS 未生效或 80/443 未放行：`dig +short dsh.example.com` 应等于服务器 IP；安全组/防火墙放行 80（签发）与 443；Caddy 用 `sudo journalctl -u caddy -e` 看 ACME 日志 |
 | 打不开、连接被拒 | `Connection refused` / `Connection timed out` | SSH 端口不对或被防火墙拦：确认「SSH 端口」与实际 sshd 一致，安全组放行该端口；超时可重试（插件会自动退避重连） |
 | 装不到主屏（PWA） | 页面显示「非 HTTPS：浏览器不允许安装到主屏」 | 必须用 **HTTPS 域名**打开（本教程的 Caddy/nginx 就是为此）：`https://dsh.example.com`。`http://` 或纯 IP 一律不行——Service Worker 要求安全上下文。另外 iOS 只能在 Safari 里「分享 → 添加到主屏幕」 |
-| 推送收不到 | 「最近推送」显示失败/无订阅 | ① 先点「发送测试通知」看结果；② 必须 HTTPS + 已添加到主屏（Service Worker 才可以显示通知）；③ Android 的 Web Push 走 Google FCM，国内可能收不到 → 改用 Webhook（企业微信/钉钉/飞书/ntfy/Bark）；④ iOS 需 16.4+ 且已添加到主屏；⑤ 手机系统通知权限/省电策略会拦 |
+| 推送收不到 | 「最近推送」显示失败/无订阅 | ① 先点「发送测试通知」看结果；② **必须是 HTTPS 域名 + 已添加到主屏**：纯 http 局域网地址（`http://192.168.x.x`）收不到任何推送——浏览器在非安全上下文里既不给注册 Service Worker 也不给推送订阅，换到本文档的 HTTPS 域名后要**重新订阅**；③ Android 的 Web Push 走 Google FCM，国内可能收不到 → 改用 Webhook（企业微信/钉钉/飞书/ntfy/Bark）；④ iOS 需 16.4+ 且已添加到主屏；⑤ 手机系统通知权限/省电策略会拦 |
 | 通行密钥注册失败 / 没有按钮 | 页面提示需要 HTTPS 或按钮不出现 | 通行密钥只在 **HTTPS + 固定域名**（Named 或 SSH 通道）且「🔐 通行密钥设备」开关打开时可用。非 HTTPS（http、纯 IP、局域网 IP）时浏览器根本不提供 WebAuthn，插件也会直接说明。另外登录页的通行密钥按钮需要先用访问密码登录过一次才出现 |
 | 换了域名后通行密钥失效 | 登录页点通行密钥提示「这台设备没有注册通行密钥」 | 正常：通行密钥按域名（rpId）隔离。Caddy 域名与 Cloudflare 域名是两套凭据，换域名后在新域名上重新注册一次 |
 | 手机上一切正常，但重启电脑后要重新输密码 | — | 共享访问密码的登录会话绑定 dsh web 进程，重启即失效（设计如此）；通行密钥/设备 Cookie 不受影响（180 天） |

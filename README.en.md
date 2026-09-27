@@ -173,10 +173,11 @@ For the SSH channel, "Access protocol / Public hostname / Public port" only affe
 
 ## 📲 Install to home screen (PWA)
 
-Open the page over an **HTTPS hostname** (a Cloudflare fixed hostname or your own VPS domain) and install it to the home screen for a full-screen, app-like experience:
+Open the page over an **HTTPS hostname** (a Cloudflare fixed hostname or your own VPS domain) and install it to the home screen for a full-screen, app-like experience (note: **Web Push notifications are only possible over an HTTPS hostname too** — see the next section):
 
 - **Android Chrome**: Settings → Phone access → the "🔔 Notifications & PWA" block → click "**Install to home screen**" when the button appears; or use the browser menu → "Install app / Add to Home screen".
 - **iOS Safari**: tap Share → "**Add to Home Screen**". (That's the only way on iOS — and it is a **prerequisite for Web Push on iOS 16.4+**.)
+- The browser's own install path (menu / Share) **does not need the plugin's settings page**: the page itself carries the PWA tags, so the **login page** (before you enter the PIN) can be added to the home screen as well; the plugin's "Install to home screen" button does need you to be signed in (it consumes the browser's install event).
 - Why bother: full screen with no address bar; the service worker can show push notifications; offline opens show a "can't reach the computer" notice page.
 
 **When it can't install** (the reason is printed where the button would be):
@@ -213,7 +214,10 @@ When a task finishes on the computer, notify your phone. Both channels can be on
 
 > ⚠️ **Be honest about mainland-China networking**: Android Chrome Web Push goes through **Google FCM** and generally does not arrive there; iOS uses Apple's push service (requires iOS 16.4+ and a home-screen install) and usually works. So in mainland China **prefer the Webhook** (WeCom / DingTalk / Feishu / ntfy / Bark are all reachable), or install the page to the home screen and check it yourself.
 >
-> Web Push has two hard prerequisites: an **HTTPS secure context** and a **registered service worker** (i.e. the page must be installable). Subscribing from LAN `http://192.168.x.x` always fails.
+> Web Push has two hard prerequisites: an **HTTPS secure context** and a **registered service worker** (i.e. the page must be installable).
+>
+> ⚠️ That means a **plain-http LAN address (`http://192.168.x.x`) can never receive push notifications** — it is not a plugin limitation: in an insecure context the browser refuses both service-worker registration and push subscription, so "Subscribe this device" always fails (the page reports "no Web Push support" or the failure reason).
+> To get notifications, open the settings page over an **HTTPS hostname** and subscribe there: your own VPS (SSH channel, Caddy-issued certificate) or a Cloudflare fixed hostname both work. **Moving from the http address to the https hostname requires subscribing again** (push subscriptions are stored per origin and do not follow a hostname change). The LAN address still lets you read sessions and run tasks — it just cannot deliver notifications, so use a Webhook there.
 >
 > Storage: switches and Webhook config live in `$DSH_HOME/dsh-pocket/settings.json`; push subscriptions and the VAPID key live in `$DSH_HOME/dsh-pocket/push.json` (local-only; no secret is ever echoed to the page).
 
