@@ -15,6 +15,7 @@ import vm from 'node:vm';
 import { inflateSync, crc32 } from 'node:zlib';
 import {
   ICONS,
+  PUSH_SUB_TO_JSON_SRC,
   PWA_PATHS,
   SW_SOURCE,
   contentTypeFor,
@@ -421,4 +422,38 @@ test('pwaAssetFor：路由表与 manifest 图标一致', () => {
   assert.equal(pwaAssetFor('/pocket-icon-192.png?v=2').body.length > 0, true, '带 query 也要能命中');
   // 自定义 manifest 参数能透传
   assert.equal(JSON.parse(pwaAssetFor(PWA_PATHS.manifest, { manifest: { name: 'X' } }).body).name, 'X');
+});
+
+test('订阅序列化（客户端与 SW 共用）：不依赖 toJSON 也能拿到 endpoint 与密钥', async () => {
+  // 同一段源码被 SW 与代理注入脚本共用，这里直接把它编译出来执行
+  const make = new Function(`${PUSH_SUB_TO_JSON_SRC}; return dshPushSubscriptionToJson;`)();
+  const b64u = (buf) => Buffer.from(buf).toString('base64url');
+
+  // 1) 有 toJSON 且带 endpoint → 直接用（保留浏览器给的全部字段）
+  const withToJson = { toJSON: () => ({ endpoint: 'https://push.example.com/x', keys: { p256dh: 'p', auth: 'a' } }) };
+  assert.deepEqual(make(withToJson), { endpoint: 'https://push.example.com/x', keys: { p256dh: 'p', auth: 'a' } });
+
+  // 2) 没有 toJSON（部分 Safari 版本）→ 手工构造 endpoint + getKey 密钥
+  const raw = {
+    endpoint: 'https://fcm.googleapis.com/fcm/send/abc',
+    expirationTime: null,
+    getKey: (name) => (name === 'p256dh' ? new Uint8Array([4, 1, 2]) : name === 'auth' ? new Uint8Array([9, 8]) : null),
+  };
+  const out = make(raw);
+  assert.equal(out.endpoint, 'https://fcm.googleapis.com/fcm/send/abc');
+  assert.equal(out.keys.p256dh, b64u([4, 1, 2]));
+  assert.equal(out.keys.auth, b64u([9, 8]));
+
+  // 3) toJSON 抛错 → 回落到手工构造，不把异常抛给调用方
+  const broken = { endpoint: 'https://a.example/b', getKey: () => null, toJSON: () => { throw new Error('nope'); } };
+  assert.equal(make(broken).endpoint, 'https://a.example/b');
+
+  // 4) 什么都没有 → endpoint 为空，调用方据此报可读错误（而不是 POST 一个 {} 给后端）
+  assert.equal(make({}).endpoint, '');
+
+  // 5) 两个消费点都必须用这个共用函数，而不是裸 toJSON
+  const { POCKET_PWA_JS } = await import('../lib/proxy.mjs');
+  assert.ok(SW_SOURCE.includes('dshPushSubscriptionToJson(subscription)'), 'SW 续订必须用共用序列化函数');
+  assert.ok(POCKET_PWA_JS.includes('dshPushSubscriptionToJson(sub)'), '注入脚本订阅必须用共用序列化函数');
+  assert.ok(!/typeof sub\.toJSON === .function. \? sub\.toJSON\(\) : sub/.test(POCKET_PWA_JS), '不应再有裸 toJSON 回落');
 });
