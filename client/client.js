@@ -2159,6 +2159,10 @@ var zh2 = {
   "notifyTestSent": "\u2705 \u5DF2\u53D1\u51FA\u6D4B\u8BD5\u901A\u77E5\uFF08\u6CA1\u6536\u5230\u5C31\u770B\u4E0B\u65B9\u300C\u6700\u8FD1\u63A8\u9001\u300D\uFF09",
   "notifyTestFailed": "\u274C \u53D1\u9001\u5931\u8D25\uFF1A{err}",
   "notifyLastResult": "\u6700\u8FD1\u63A8\u9001\uFF1A{text}",
+  "notifyRecentTitle": "\u6700\u8FD1\u63A8\u9001\uFF08\u6700\u591A 5 \u6761\uFF09\uFF1A",
+  "notifyHostFcm": "Google FCM\uFF08\u56FD\u5185\u901A\u5E38\u4E0D\u53EF\u8FBE\uFF09",
+  "notifyHostMozilla": "Mozilla\uFF08Firefox\uFF09",
+  "notifyHostApple": "Apple\uFF08Safari/iOS\uFF09",
   "notifyResultOk": "\u6210\u529F",
   "notifyResultFail": "\u5931\u8D25\uFF1A{err}",
   "notifyResultPush": "Web Push",
@@ -2384,6 +2388,10 @@ var en2 = {
   "notifyTestSent": "\u2705 Test notification sent (if it did not arrive, see \u201CLast push\u201D below)",
   "notifyTestFailed": "\u274C Send failed: {err}",
   "notifyLastResult": "Last push: {text}",
+  "notifyRecentTitle": "Recent pushes (up to 5):",
+  "notifyHostFcm": "Google FCM (usually unreachable in mainland China)",
+  "notifyHostMozilla": "Mozilla (Firefox)",
+  "notifyHostApple": "Apple (Safari/iOS)",
   "notifyResultOk": "ok",
   "notifyResultFail": "failed: {err}",
   "notifyResultPush": "Web Push",
@@ -3208,9 +3216,28 @@ function PocketSettingsTab({ rpcCall, t }) {
     }
   };
   const resultChannel = (r) => r?.channel === "webhook" ? t("notifyResultWebhook") : t("notifyResultPush");
-  const resultText = (r) => `${resultChannel(r)} \xB7 ${r?.ok === true ? t("notifyResultOk") : fmt(t, "notifyResultFail", { err: errText(r?.error) || `HTTP ${r?.status ?? "\u2014"}` })}`;
+  const resultHost = (r) => {
+    const ep = typeof r?.endpoint === "string" ? r.endpoint : "";
+    try {
+      return ep ? new URL(ep).host : "";
+    } catch {
+      return "";
+    }
+  };
+  const pushHostHint = (host) => {
+    const h2 = String(host || "").toLowerCase();
+    if (h2.includes("fcm.googleapis.com") || h2.includes("android.googleapis.com")) return t("notifyHostFcm");
+    if (h2.includes("mozilla")) return t("notifyHostMozilla");
+    if (h2.includes("apple")) return t("notifyHostApple");
+    return host || "";
+  };
+  const resultText = (r) => [
+    resultChannel(r),
+    pushHostHint(resultHost(r)),
+    r?.ok === true ? t("notifyResultOk") : fmt(t, "notifyResultFail", { err: errText(r?.error) || `HTTP ${r?.status ?? "\u2014"}` })
+  ].filter(Boolean).join(" \xB7 ");
   const notifyResults = Array.isArray(notifyStatusData?.lastResults) ? notifyStatusData.lastResults : Array.isArray(notifyStatusData?.results) ? notifyStatusData.results : [];
-  const notifyLastResult = notifyResults.length ? notifyResults[notifyResults.length - 1] : null;
+  const notifyRecent = notifyResults.slice(-5).reverse();
   const pushUnavailableText = () => {
     if (typeof window !== "undefined" && window.isSecureContext === false) return t("notifyPushInsecure");
     return t("notifyPushUnsupported");
@@ -3703,11 +3730,16 @@ function PocketSettingsTab({ rpcCall, t }) {
           t("notifyTest"),
           (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: sendTestNotification, disabled: notifyBusy }, notifyBusy ? t("notifyTesting") : t("notifyTest"))
         ),
-        // 最近一次推送结果（notify.status 的 lastResults；宿主没返回就不显示）
+        // 最近推送结果：列出最近 5 条（含推送服务归属），避免只看到末条而误判
         (0, import_react2.createElement)(
           "div",
           { style: { ...styles.muted, marginTop: 6, wordBreak: "break-word" } },
-          notifyLastResult ? fmt(t, "notifyLastResult", { text: resultText(notifyLastResult) }) : t("notifyNoResult")
+          notifyRecent.length ? (0, import_react2.createElement)(
+            "div",
+            null,
+            (0, import_react2.createElement)("div", null, t("notifyRecentTitle")),
+            ...notifyRecent.map((r, i) => (0, import_react2.createElement)("div", { key: `push-result-${i}`, style: { marginTop: 2 } }, resultText(r)))
+          ) : t("notifyNoResult")
         ),
         // 任务完成时推送（与 Webhook 无关的全局开关）
         row(t("notifyOnTaskDone"), Switch(notifyView.onTaskDone !== false, () => setNotifyFlag("onTaskDone", notifyView.onTaskDone === false))),

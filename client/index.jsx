@@ -773,12 +773,31 @@ function PocketSettingsTab({ rpcCall, t }) {
     }
   };
   const resultChannel = (r) => (r?.channel === 'webhook' ? t('notifyResultWebhook') : t('notifyResultPush'));
-  const resultText = (r) => `${resultChannel(r)} · ${r?.ok === true ? t('notifyResultOk') : fmt(t, 'notifyResultFail', { err: errText(r?.error) || `HTTP ${r?.status ?? '—'}` })}`;
-  // 最近一次推送结果（notify.status 的 lastResults/results 末条；宿主没返回就不显示）
+  const resultHost = (r) => {
+    const ep = typeof r?.endpoint === 'string' ? r.endpoint : '';
+    try { return ep ? new URL(ep).host : ''; } catch { return ''; }
+  };
+  // 推送服务归属提示：国内网络下 Google FCM 不可达是最常见的失败原因（报错就是 undici 的
+  // "fetch failed"），而同一批结果里 Mozilla/Apple 往往是成功的。直接把归属标出来，
+  // 免得用户以为是插件或浏览器的问题。
+  const pushHostHint = (host) => {
+    const h = String(host || '').toLowerCase();
+    if (h.includes('fcm.googleapis.com') || h.includes('android.googleapis.com')) return t('notifyHostFcm');
+    if (h.includes('mozilla')) return t('notifyHostMozilla');
+    if (h.includes('apple')) return t('notifyHostApple');
+    return host || '';
+  };
+  const resultText = (r) => [
+    resultChannel(r),
+    pushHostHint(resultHost(r)),
+    r?.ok === true ? t('notifyResultOk') : fmt(t, 'notifyResultFail', { err: errText(r?.error) || `HTTP ${r?.status ?? '—'}` }),
+  ].filter(Boolean).join(' · ');
+  // 最近推送结果（notify.status 的 lastResults/results）：**列出最近若干条**而不是只看末条 ——
+  // 只显示末条会把"某条 FCM 订阅失败、其余 Mozilla/Apple 订阅成功"这种真实情况盖掉。
   const notifyResults = Array.isArray(notifyStatusData?.lastResults)
     ? notifyStatusData.lastResults
     : (Array.isArray(notifyStatusData?.results) ? notifyStatusData.results : []);
-  const notifyLastResult = notifyResults.length ? notifyResults[notifyResults.length - 1] : null;
+  const notifyRecent = notifyResults.slice(-5).reverse(); // 最新在前
   // 推送不可用时的具体原因：非安全上下文（http + 非 localhost）最常见，不能一律说"浏览器不支持"
   const pushUnavailableText = () => {
     if (typeof window !== 'undefined' && window.isSecureContext === false) return t('notifyPushInsecure');
@@ -1209,10 +1228,12 @@ function PocketSettingsTab({ rpcCall, t }) {
             // 发送测试通知
             row(t('notifyTest'),
               h('button', { style: styles.smallBtn, onClick: sendTestNotification, disabled: notifyBusy }, notifyBusy ? t('notifyTesting') : t('notifyTest'))),
-            // 最近一次推送结果（notify.status 的 lastResults；宿主没返回就不显示）
+            // 最近推送结果：列出最近 5 条（含推送服务归属），避免只看到末条而误判
             h('div', { style: { ...styles.muted, marginTop: 6, wordBreak: 'break-word' } },
-              notifyLastResult
-                ? fmt(t, 'notifyLastResult', { text: resultText(notifyLastResult) })
+              notifyRecent.length
+                ? h('div', null,
+                  h('div', null, t('notifyRecentTitle')),
+                  ...notifyRecent.map((r, i) => h('div', { key: `push-result-${i}`, style: { marginTop: 2 } }, resultText(r))))
                 : t('notifyNoResult')),
             // 任务完成时推送（与 Webhook 无关的全局开关）
             row(t('notifyOnTaskDone'), Switch(notifyView.onTaskDone !== false, () => setNotifyFlag('onTaskDone', notifyView.onTaskDone === false))),

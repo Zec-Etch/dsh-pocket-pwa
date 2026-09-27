@@ -716,6 +716,25 @@ test('设置页：选中 SSH 但主机/用户名没填 → 启动被明确阻止
   assert.ok(tab.texts().includes(POCKET_ZH.sshNeedCfg), '应明确提示「请先填写 SSH 主机与用户名」');
 });
 
+test('设置页：推送结果列出多条并标注推送服务归属（FCM 失败不再掩盖 Mozilla/Apple 成功）', async () => {
+  const lastResults = [
+    { channel: 'push', ok: false, status: 0, error: '推送网络错误: fetch failed | network error', endpoint: 'https://fcm.googleapis.com/fcm/send/abc', at: 1 },
+    { channel: 'push', ok: true, status: 201, endpoint: 'https://updates.push.services.mozilla.com/wpush/v2/xyz', at: 2 },
+    { channel: 'webhook', ok: true, status: 200, at: 3 },
+  ];
+  const status = { ...FULL_STATUS, notify: { ...FULL_STATUS.notify, lastResults } };
+  const rpc = (endpoint) => (endpoint === POCKET_ENDPOINTS.status ? status
+    : endpoint === POCKET_ENDPOINTS.notifyStatus ? { ...status.notify }
+      : fullRpc(endpoint));
+  const tab = await mountSettingsTab({ status, rpc });
+  await tab.settle();
+  const texts = tab.texts();
+  assert.ok(texts.includes(POCKET_ZH.notifyRecentTitle), '应列出多条最近推送，而不是只显示末条');
+  assert.ok(texts.includes(POCKET_ZH.notifyHostFcm), 'FCM 订阅应标注 Google FCM（国内通常不可达）');
+  assert.ok(texts.includes(POCKET_ZH.notifyHostMozilla), 'Mozilla 订阅应标注来源');
+  assert.ok(texts.includes(POCKET_ZH.notifyResultOk), '同一批里成功的订阅结果也必须显示（不被失败项掩盖）');
+});
+
 test('设置页：通行密钥注册入口常驻（登录后的横幅被关掉也能注册）', async () => {
   // 没有注入 dshPocketPasskey：点击给出明确原因，而不是静默失败
   const noApi = await mountSettingsTab({ status: FULL_STATUS, rpc: fullRpc });
