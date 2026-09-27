@@ -716,6 +716,30 @@ test('设置页：选中 SSH 但主机/用户名没填 → 启动被明确阻止
   assert.ok(tab.texts().includes(POCKET_ZH.sshNeedCfg), '应明确提示「请先填写 SSH 主机与用户名」');
 });
 
+test('设置页：网络自检按钮 → notify.diagnose，并渲染宿主环境与逐主机结果', async () => {
+  const diag = {
+    env: { node: 'v24.15.0', httpsProxy: '', httpProxy: '', noProxy: '', useEnvProxy: '', platform: 'win32' },
+    results: [
+      { host: 'fcm.googleapis.com', dns: 'IPv4 1.2.3.4', tcp: [{ family: 4, ok: false, error: 'UND_ERR_CONNECT_TIMEOUT' }], http: { ok: false, error: 'UND_ERR_CONNECT_TIMEOUT' } },
+      { host: 'updates.push.services.mozilla.com', dns: 'IPv4 5.6.7.8', tcp: [{ family: 4, ok: true, address: '5.6.7.8', ms: 42 }], http: { ok: true, status: 404 } },
+    ],
+  };
+  const rpc = (endpoint) => (endpoint === POCKET_ENDPOINTS.status ? FULL_STATUS
+    : endpoint === POCKET_ENDPOINTS.notifyStatus ? { ...FULL_STATUS.notify }
+      : endpoint === POCKET_ENDPOINTS.notifyDiagnose ? diag
+        : fullRpc(endpoint));
+  const tab = await mountSettingsTab({ status: FULL_STATUS, rpc });
+  await tab.settle();
+  assert.equal(tab.buttons(POCKET_ZH.notifyDiagnoseBtn).length, 1, '通知区块应有「开始自检」按钮');
+  await tab.click(POCKET_ZH.notifyDiagnoseBtn);
+  await tab.settle(2);
+  assert.ok(tab.rpcCalls.some((c) => c.endpoint === POCKET_ENDPOINTS.notifyDiagnose), '应调用 notify.diagnose');
+  const texts = tab.texts();
+  assert.ok(texts.includes('fcm.googleapis.com'), '应列出被探测的主机');
+  assert.ok(texts.includes('UND_ERR_CONNECT_TIMEOUT'), '应显示底层失败原因（不是笼统的 fetch failed）');
+  assert.ok(texts.includes('v24.15.0'), '应显示宿主进程 Node 版本');
+});
+
 test('设置页：推送结果列出多条并标注推送服务归属（FCM 失败不再掩盖 Mozilla/Apple 成功）', async () => {
   const lastResults = [
     { channel: 'push', ok: false, status: 0, error: '推送网络错误: fetch failed | network error', endpoint: 'https://fcm.googleapis.com/fcm/send/abc', at: 1 },

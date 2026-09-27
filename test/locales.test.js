@@ -51,6 +51,7 @@ const NEW_KEYS = [
   'notifySubscribed', 'notifyUnsubscribed', 'notifySubscribeFailed', 'notifyUnsubscribeFailed',
   'notifyPushUnsupported', 'notifyPushInsecure', 'notifyTest', 'notifyTesting', 'notifyTestSent', 'notifyTestFailed',
   'notifyLastResult', 'notifyRecentTitle', 'notifyHostFcm', 'notifyHostMozilla', 'notifyHostApple',
+  'notifyDiagnose', 'notifyDiagnoseBtn', 'notifyDiagnosing', 'notifyDiagnoseNoProxy', 'notifyDiagnoseEnv',
   'notifyResultOk', 'notifyResultFail', 'notifyResultPush', 'notifyResultWebhook',
   'notifyNoResult', 'notifyClear', 'notifyClearConfirm', 'notifyCleared', 'notifyClearFailed', 'notifyWebhook', 'notifyWebhookHint', 'notifyPreset', 'notifyUrl', 'notifySecret',
   'notifySecretHint', 'notifySecretSet', 'notifyOnTaskDone', 'notifyMinInterval', 'notifyMinIntervalHint',

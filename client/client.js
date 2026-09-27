@@ -75,7 +75,9 @@ var POCKET_ENDPOINTS = Object.freeze({
   notifyStatus: "notify.status",
   notifyRemoveSubscription: "notify.removeSubscription",
   notifyClearSubscriptions: "notify.clearSubscriptions",
-  notifyTest: "notify.test"
+  notifyTest: "notify.test",
+  // 网络自检：在宿主进程里探测订阅/Webhook 主机的 DNS、TCP、HTTP 与进程网络环境。
+  notifyDiagnose: "notify.diagnose"
 });
 function compareVersions(a, b) {
   const pa = String(a).replace(/^[vV]/, "").split(".");
@@ -2160,6 +2162,11 @@ var zh2 = {
   "notifyTestFailed": "\u274C \u53D1\u9001\u5931\u8D25\uFF1A{err}",
   "notifyLastResult": "\u6700\u8FD1\u63A8\u9001\uFF1A{text}",
   "notifyRecentTitle": "\u6700\u8FD1\u63A8\u9001\uFF08\u6700\u591A 5 \u6761\uFF09\uFF1A",
+  "notifyDiagnose": "\u7F51\u7EDC\u81EA\u68C0",
+  "notifyDiagnoseBtn": "\u5F00\u59CB\u81EA\u68C0",
+  "notifyDiagnosing": "\u81EA\u68C0\u4E2D\u2026",
+  "notifyDiagnoseNoProxy": "\u672A\u8BBE\u7F6E",
+  "notifyDiagnoseEnv": "\u5BBF\u4E3B\u8FDB\u7A0B\uFF1ANode {node} \xB7 \u4EE3\u7406 {proxy} \xB7 NODE_USE_ENV_PROXY {useEnvProxy}",
   "notifyHostFcm": "Google FCM\uFF08\u56FD\u5185\u901A\u5E38\u4E0D\u53EF\u8FBE\uFF09",
   "notifyHostMozilla": "Mozilla\uFF08Firefox\uFF09",
   "notifyHostApple": "Apple\uFF08Safari/iOS\uFF09",
@@ -2389,6 +2396,11 @@ var en2 = {
   "notifyTestFailed": "\u274C Send failed: {err}",
   "notifyLastResult": "Last push: {text}",
   "notifyRecentTitle": "Recent pushes (up to 5):",
+  "notifyDiagnose": "Network self-check",
+  "notifyDiagnoseBtn": "Run self-check",
+  "notifyDiagnosing": "Checking\u2026",
+  "notifyDiagnoseNoProxy": "not set",
+  "notifyDiagnoseEnv": "Host process: Node {node} \xB7 proxy {proxy} \xB7 NODE_USE_ENV_PROXY {useEnvProxy}",
   "notifyHostFcm": "Google FCM (usually unreachable in mainland China)",
   "notifyHostMozilla": "Mozilla (Firefox)",
   "notifyHostApple": "Apple (Safari/iOS)",
@@ -3215,6 +3227,18 @@ function PocketSettingsTab({ rpcCall, t }) {
       setNotifyBusy(false);
     }
   };
+  const [diagnoseBusy, setDiagnoseBusy] = (0, import_react2.useState)(false);
+  const [diagnoseData, setDiagnoseData] = (0, import_react2.useState)(null);
+  const runDiagnose = async () => {
+    setDiagnoseBusy(true);
+    try {
+      setDiagnoseData(await call(POCKET_ENDPOINTS.notifyDiagnose, {}));
+    } catch (err) {
+      setDiagnoseData({ error: err?.message ?? String(err) });
+    } finally {
+      setDiagnoseBusy(false);
+    }
+  };
   const resultChannel = (r) => r?.channel === "webhook" ? t("notifyResultWebhook") : t("notifyResultPush");
   const resultHost = (r) => {
     const ep = typeof r?.endpoint === "string" ? r.endpoint : "";
@@ -3729,6 +3753,26 @@ function PocketSettingsTab({ rpcCall, t }) {
         row(
           t("notifyTest"),
           (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: sendTestNotification, disabled: notifyBusy }, notifyBusy ? t("notifyTesting") : t("notifyTest"))
+        ),
+        // 网络自检：宿主进程侧的真实连通性（DNS/TCP/HTTP + 代理环境）
+        row(
+          t("notifyDiagnose"),
+          (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: runDiagnose, disabled: diagnoseBusy }, diagnoseBusy ? t("notifyDiagnosing") : t("notifyDiagnoseBtn")),
+          diagnoseData ? (0, import_react2.createElement)(
+            "div",
+            { style: { ...styles.muted, marginTop: 6, wordBreak: "break-word", fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12, lineHeight: 1.6 } },
+            (0, import_react2.createElement)("div", null, fmt(t, "notifyDiagnoseEnv", {
+              node: diagnoseData.env?.node ?? "\u2014",
+              proxy: diagnoseData.env?.httpsProxy || diagnoseData.env?.httpProxy || t("notifyDiagnoseNoProxy"),
+              useEnvProxy: diagnoseData.env?.useEnvProxy || "0"
+            })),
+            ...Array.isArray(diagnoseData.results) ? diagnoseData.results.map((r, i) => (0, import_react2.createElement)(
+              "div",
+              { key: `diag-${i}`, style: { marginTop: 3 } },
+              `${r?.host ?? "?"}: ${r?.dns || "\u2014"} | TCP ${(Array.isArray(r?.tcp) ? r.tcp : []).map((x) => `IPv${x.family} ${x.ok ? `OK ${x.ms}ms` : `\u5931\u8D25(${x.error})`}`).join(" / ") || "\u2014"} | HTTPS ${r?.http ? r.http.ok ? `HTTP ${r.http.status}` : `\u5931\u8D25(${r.http.error})` : "\u2014"}`
+            )) : null,
+            diagnoseData.error ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR } }, errText(diagnoseData.error)) : null
+          ) : null
         ),
         // 最近推送结果：列出最近 5 条（含推送服务归属），避免只看到末条而误判
         (0, import_react2.createElement)(

@@ -36,6 +36,8 @@ export const POCKET_ENDPOINTS = Object.freeze({
   notifyRemoveSubscription: 'notify.removeSubscription',
   notifyClearSubscriptions: 'notify.clearSubscriptions',
   notifyTest: 'notify.test',
+  // 网络自检：在宿主进程里探测订阅/Webhook 主机的 DNS、TCP、HTTP 与进程网络环境。
+  notifyDiagnose: 'notify.diagnose',
 });
 
 /** 语义化版本比较：a > b 返回正数，相等 0，a < b 负数（数字段 + 预发布后缀）。 */

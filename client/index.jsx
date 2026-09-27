@@ -772,6 +772,20 @@ function PocketSettingsTab({ rpcCall, t }) {
       setNotifyBusy(false);
     }
   };
+  // 网络自检：让**宿主进程**报告它到订阅端点/Webhook 主机的 DNS/TCP/HTTP 结果与代理环境。
+  // 用户看到 "推送网络错误: fetch failed" 时，这是唯一能看清宿主侧真实原因的手段。
+  const [diagnoseBusy, setDiagnoseBusy] = useState(false);
+  const [diagnoseData, setDiagnoseData] = useState(null);
+  const runDiagnose = async () => {
+    setDiagnoseBusy(true);
+    try {
+      setDiagnoseData(await call(POCKET_ENDPOINTS.notifyDiagnose, {}));
+    } catch (err) {
+      setDiagnoseData({ error: err?.message ?? String(err) });
+    } finally {
+      setDiagnoseBusy(false);
+    }
+  };
   const resultChannel = (r) => (r?.channel === 'webhook' ? t('notifyResultWebhook') : t('notifyResultPush'));
   const resultHost = (r) => {
     const ep = typeof r?.endpoint === 'string' ? r.endpoint : '';
@@ -1228,6 +1242,20 @@ function PocketSettingsTab({ rpcCall, t }) {
             // 发送测试通知
             row(t('notifyTest'),
               h('button', { style: styles.smallBtn, onClick: sendTestNotification, disabled: notifyBusy }, notifyBusy ? t('notifyTesting') : t('notifyTest'))),
+            // 网络自检：宿主进程侧的真实连通性（DNS/TCP/HTTP + 代理环境）
+            row(t('notifyDiagnose'),
+              h('button', { style: styles.smallBtn, onClick: runDiagnose, disabled: diagnoseBusy }, diagnoseBusy ? t('notifyDiagnosing') : t('notifyDiagnoseBtn')),
+              diagnoseData
+                ? h('div', { style: { ...styles.muted, marginTop: 6, wordBreak: 'break-word', fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 12, lineHeight: 1.6 } },
+                  h('div', null, fmt(t, 'notifyDiagnoseEnv', {
+                    node: diagnoseData.env?.node ?? '—',
+                    proxy: diagnoseData.env?.httpsProxy || diagnoseData.env?.httpProxy || t('notifyDiagnoseNoProxy'),
+                    useEnvProxy: diagnoseData.env?.useEnvProxy || '0',
+                  })),
+                  ...(Array.isArray(diagnoseData.results) ? diagnoseData.results.map((r, i) => h('div', { key: `diag-${i}`, style: { marginTop: 3 } },
+                    `${r?.host ?? '?'}: ${r?.dns || '—'} | TCP ${(Array.isArray(r?.tcp) ? r.tcp : []).map((x) => `IPv${x.family} ${x.ok ? `OK ${x.ms}ms` : `失败(${x.error})`}`).join(' / ') || '—'} | HTTPS ${r?.http ? (r.http.ok ? `HTTP ${r.http.status}` : `失败(${r.http.error})`) : '—'}`)) : null),
+                  diagnoseData.error ? h('div', { style: { color: COLOR_ERR } }, errText(diagnoseData.error)) : null)
+                : null),
             // 最近推送结果：列出最近 5 条（含推送服务归属），避免只看到末条而误判
             h('div', { style: { ...styles.muted, marginTop: 6, wordBreak: 'break-word' } },
               notifyRecent.length
