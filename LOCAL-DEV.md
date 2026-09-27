@@ -32,7 +32,7 @@ ls -l dsh-pocket
 
 ```sh
 node client/build.mjs     # 只改后端可跳过
-npm test                  # 建议顺手跑一遍（当前 109 个用例）
+npm test                  # 建议顺手跑一遍（全量用例，数量看运行输出的 ℹ tests）
 ```
 
 ### 重启 dsh web
@@ -61,18 +61,38 @@ curl -s -o /dev/null -w "3081:%{http_code}\n" http://127.0.0.1:3081/   # dsh-poc
 
 ## 三、确认加载的确实是本地代码
 
-页面引用的 `client.js` 带一个 `rev` 参数，它是打包产物内容的 sha1 前 12 位。比对一下就知道有没有生效：
+> ⚠️ **不要再用 `shasum -a 1 client/client.js` 去比 `rev`**：那是旧版 DSH 的行为。DSH 0.1.7-rc.2 里
+> `rev` 由 `@deepseek-ai/dsh-client-modules` 的 `artifactRevision()` 生成 —— 它对**文件元数据**
+> （`mtimeMs` / `ctimeMs` / `size`，长度前缀拼接后再 sha1，取前 12 位）取哈希，**不是内容哈希**。
+> 结论：内容没变、只是重新打包（mtime 变了）rev 也会变；内容变了但元数据恰好没变则不会变。拿它当「内容指纹」会误判。
+
+正确做法是**逐字节比对**：把页面实际引用的那份 `client.js` 抓下来，看它是否包含本地文件的完整内容：
 
 ```sh
-# 页面正在引用的版本
-REV=$(curl -s http://127.0.0.1:3080/ | grep -o 'dsh-pocket/client.js?rev=[a-f0-9]*' | head -1 | cut -d= -f2)
-echo $REV
-
-# 本地打包产物的 sha1 前 12 位
-shasum -a 1 client/client.js | cut -c1-12
+node --input-type=module -e "
+const { readFileSync } = await import('node:fs');
+const local = readFileSync('client/client.js', 'utf8');
+const html = await (await fetch('http://127.0.0.1:3080/')).text();
+const tokens = html.split(/[\s<>()\u0022\u0027]+/).filter((s) => s.length > 0); // 按空白/引号/尖括号切词（\u0022 是双引号、\u0027 是单引号，免得和 shell 的引号打架）
+const refs = [...new Set(tokens.filter((u) => u.includes('client.js') && u.includes('rev=') && u.includes('dsh-pocket')))];
+if (refs.length === 0) { console.log('页面里没有 dsh-pocket/client.js 引用 —— dsh web 没起来，或插件没加载成功'); process.exit(1); }
+for (const ref of refs) {
+  const url = new URL(ref, 'http://127.0.0.1:3080/');
+  const served = await (await fetch(url)).text();
+  const hit = served.includes(local);
+  console.log((hit ? 'OK   ' : 'MISS ') + url.pathname + url.search + '  served=' + served.length + 'B');
+}
+console.log('本地 client/client.js = ' + local.length + 'B；上面出现 OK 且路径含 dsh-pocket = 本地代码已生效');
+"
 ```
 
-两者一致 = 本地代码已生效。
+说明：
+
+- 用 `includes` 而不是 `===`：DSH 会在 chunk 末尾追加一行 `//# sourceMappingURL=client.js.map?rev=…`；
+- DSH 0.1.7-rc.2 的引用既可能是 `/plugins/dsh-pocket/client.js?rev=…`，也可能是 `/plugins/??dsh-pocket/client.js,…&rev=…`
+  这种组合资源，所以脚本按「含 `client.js` + `rev=` + `dsh-pocket`」筛选，两种都能抓到；
+- **MISS = 页面加载的不是这份产物**：最常见就是改完 `client/` 忘了 `node client/build.mjs`，或者 dsh web 没重启成功
+  （看 `/tmp/dsh-web-dev.log`）。这条比旧的 rev 比对更直接：它比的是内容本身。
 
 ## 四、换回 npm 官方版本
 
