@@ -716,6 +716,30 @@ test('设置页：选中 SSH 但主机/用户名没填 → 启动被明确阻止
   assert.ok(tab.texts().includes(POCKET_ZH.sshNeedCfg), '应明确提示「请先填写 SSH 主机与用户名」');
 });
 
+test('设置页（回归）：自检返回错误或字段残缺时只显示一行信息，绝不白屏', async () => {
+  // ① 宿主不支持/返回错误：results 缺失（历史上这里 `...null` 会把设置页打崩）
+  const errRpc = (endpoint) => (endpoint === POCKET_ENDPOINTS.status ? FULL_STATUS
+    : endpoint === POCKET_ENDPOINTS.notifyStatus ? { ...FULL_STATUS.notify }
+      : endpoint === POCKET_ENDPOINTS.notifyDiagnose ? { error: '网络自检不可用 | network diagnose unavailable' }
+        : fullRpc(endpoint));
+  const tab = await mountSettingsTab({ status: FULL_STATUS, rpc: errRpc });
+  await tab.settle();
+  await tab.click(POCKET_ZH.notifyDiagnoseBtn);
+  await tab.settle(2);
+  assert.ok(tab.texts().includes('网络自检不可用'), '应显示可读错误而不是白屏');
+
+  // ② 结果条目残缺（没有 tcp/http、env 缺失）也必须渲染出来
+  const partialRpc = (endpoint) => (endpoint === POCKET_ENDPOINTS.status ? FULL_STATUS
+    : endpoint === POCKET_ENDPOINTS.notifyStatus ? { ...FULL_STATUS.notify }
+      : endpoint === POCKET_ENDPOINTS.notifyDiagnose ? { env: null, results: [{ host: 'x.example.com' }] }
+        : fullRpc(endpoint));
+  const tab2 = await mountSettingsTab({ status: FULL_STATUS, rpc: partialRpc });
+  await tab2.settle();
+  await tab2.click(POCKET_ZH.notifyDiagnoseBtn);
+  await tab2.settle(2);
+  assert.ok(tab2.texts().includes('x.example.com'), '残缺结果也要把主机名渲染出来');
+});
+
 test('设置页：网络自检按钮 → notify.diagnose，并渲染宿主环境与逐主机结果', async () => {
   const diag = {
     env: { node: 'v24.15.0', httpsProxy: '', httpProxy: '', noProxy: '', useEnvProxy: '', platform: 'win32' },

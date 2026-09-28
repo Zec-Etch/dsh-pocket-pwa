@@ -786,6 +786,15 @@ function PocketSettingsTab({ rpcCall, t }) {
       setDiagnoseBusy(false);
     }
   };
+  // 渲染外部数据（RPC 结果）时的兜底：任何异常都退化成一行可读文本，绝不整页白屏。
+  // 起因：自检结果缺 results 时曾写成 `...(cond ? arr : null)`，`...null` 抛 TypeError 把设置页打崩。
+  const safeNode = (render) => {
+    try {
+      return render();
+    } catch (err) {
+      return h('div', { style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)', fontSize: 12, wordBreak: 'break-word' } }, `渲染失败：${err?.message ?? err}`);
+    }
+  };
   const resultChannel = (r) => (r?.channel === 'webhook' ? t('notifyResultWebhook') : t('notifyResultPush'));
   const resultHost = (r) => {
     const ep = typeof r?.endpoint === 'string' ? r.endpoint : '';
@@ -1246,15 +1255,15 @@ function PocketSettingsTab({ rpcCall, t }) {
             row(t('notifyDiagnose'),
               h('button', { style: styles.smallBtn, onClick: runDiagnose, disabled: diagnoseBusy }, diagnoseBusy ? t('notifyDiagnosing') : t('notifyDiagnoseBtn')),
               diagnoseData
-                ? h('div', { style: { ...styles.muted, marginTop: 6, wordBreak: 'break-word', fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 12, lineHeight: 1.6 } },
+                ? safeNode(() => h('div', { style: { ...styles.muted, marginTop: 6, wordBreak: 'break-word', fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 12, lineHeight: 1.6 } },
                   h('div', null, fmt(t, 'notifyDiagnoseEnv', {
                     node: diagnoseData.env?.node ?? '—',
                     proxy: diagnoseData.env?.httpsProxy || diagnoseData.env?.httpProxy || t('notifyDiagnoseNoProxy'),
                     useEnvProxy: diagnoseData.env?.useEnvProxy || '0',
                   })),
-                  ...(Array.isArray(diagnoseData.results) ? diagnoseData.results.map((r, i) => h('div', { key: `diag-${i}`, style: { marginTop: 3 } },
-                    `${r?.host ?? '?'}: ${r?.dns || '—'} | TCP ${(Array.isArray(r?.tcp) ? r.tcp : []).map((x) => `IPv${x.family} ${x.ok ? `OK ${x.ms}ms` : `失败(${x.error})`}`).join(' / ') || '—'} | HTTPS ${r?.http ? (r.http.ok ? `HTTP ${r.http.status}` : `失败(${r.http.error})`) : '—'}`)) : null),
-                  diagnoseData.error ? h('div', { style: { color: COLOR_ERR } }, errText(diagnoseData.error)) : null)
+                  ...(Array.isArray(diagnoseData.results) ? diagnoseData.results : []).map((r, i) => h('div', { key: `diag-${i}`, style: { marginTop: 3 } },
+                    `${r?.host ?? '?'}: ${r?.dns || '—'} | TCP ${(Array.isArray(r?.tcp) ? r.tcp : []).map((x) => `IPv${x.family} ${x.ok ? `OK ${x.ms}ms` : `失败(${x.error})`}`).join(' / ') || '—'} | HTTPS ${r?.http ? (r.http.ok ? `HTTP ${r.http.status}` : `失败(${r.http.error})`) : '—'}`)),
+                  diagnoseData.error ? h('div', { style: { color: COLOR_ERR } }, errText(diagnoseData.error)) : null))
                 : null),
             // 最近推送结果：列出最近 5 条（含推送服务归属），避免只看到末条而误判
             h('div', { style: { ...styles.muted, marginTop: 6, wordBreak: 'break-word' } },

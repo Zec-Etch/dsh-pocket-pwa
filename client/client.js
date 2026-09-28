@@ -3239,6 +3239,13 @@ function PocketSettingsTab({ rpcCall, t }) {
       setDiagnoseBusy(false);
     }
   };
+  const safeNode = (render) => {
+    try {
+      return render();
+    } catch (err) {
+      return (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, wordBreak: "break-word" } }, `\u6E32\u67D3\u5931\u8D25\uFF1A${err?.message ?? err}`);
+    }
+  };
   const resultChannel = (r) => r?.channel === "webhook" ? t("notifyResultWebhook") : t("notifyResultPush");
   const resultHost = (r) => {
     const ep = typeof r?.endpoint === "string" ? r.endpoint : "";
@@ -3758,7 +3765,7 @@ function PocketSettingsTab({ rpcCall, t }) {
         row(
           t("notifyDiagnose"),
           (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: runDiagnose, disabled: diagnoseBusy }, diagnoseBusy ? t("notifyDiagnosing") : t("notifyDiagnoseBtn")),
-          diagnoseData ? (0, import_react2.createElement)(
+          diagnoseData ? safeNode(() => (0, import_react2.createElement)(
             "div",
             { style: { ...styles.muted, marginTop: 6, wordBreak: "break-word", fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12, lineHeight: 1.6 } },
             (0, import_react2.createElement)("div", null, fmt(t, "notifyDiagnoseEnv", {
@@ -3766,13 +3773,13 @@ function PocketSettingsTab({ rpcCall, t }) {
               proxy: diagnoseData.env?.httpsProxy || diagnoseData.env?.httpProxy || t("notifyDiagnoseNoProxy"),
               useEnvProxy: diagnoseData.env?.useEnvProxy || "0"
             })),
-            ...Array.isArray(diagnoseData.results) ? diagnoseData.results.map((r, i) => (0, import_react2.createElement)(
+            ...(Array.isArray(diagnoseData.results) ? diagnoseData.results : []).map((r, i) => (0, import_react2.createElement)(
               "div",
               { key: `diag-${i}`, style: { marginTop: 3 } },
               `${r?.host ?? "?"}: ${r?.dns || "\u2014"} | TCP ${(Array.isArray(r?.tcp) ? r.tcp : []).map((x) => `IPv${x.family} ${x.ok ? `OK ${x.ms}ms` : `\u5931\u8D25(${x.error})`}`).join(" / ") || "\u2014"} | HTTPS ${r?.http ? r.http.ok ? `HTTP ${r.http.status}` : `\u5931\u8D25(${r.http.error})` : "\u2014"}`
-            )) : null,
+            )),
             diagnoseData.error ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR } }, errText(diagnoseData.error)) : null
-          ) : null
+          )) : null
         ),
         // 最近推送结果：列出最近 5 条（含推送服务归属），避免只看到末条而误判
         (0, import_react2.createElement)(
