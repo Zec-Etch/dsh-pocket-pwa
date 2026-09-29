@@ -343,3 +343,19 @@ test('无 webServer 且无 connection.rpc.handle → 返回空 disposer + 警告
   assert.ok(warnings.some((m) => /Connection RPC unavailable/.test(m)), '应有 unavailable 警告');
   dispose();
 });
+
+test('宿主退出防护：畸形 Host 让 URL 解析失败 → 400 收口，不让异常逃进宿主路由', async () => {
+  // 桥用 `http://${host}${req.url}` 构造 Request；`Host: [` 会让 new Request 抛 TypeError。
+  // 异常一旦逃出这条 handler 就是 unhandledRejection，dsh 的 fail-loud 处理器会
+  // process.exit(1)——一个请求打死整个 DSH。
+  // 用 requestRejection 放行，好让请求真的走到桥（否则畸形 Host 会先被信任栅栏 403 拦下）
+  const env = await setup({ requestRejection: () => undefined });
+  try {
+    const res = await postJson(env.port, `${POCKET_RPC_CHANNEL}/${POCKET_ENDPOINTS.status}`, { rpcId: 'r12', method: POCKET_ENDPOINTS.status, payload: {} }, { host: '[' });
+    assert.equal(res.status, 400, '畸形 Host 应 400 收口（而非 500 / 未处理异常）');
+    assert.equal(res.body, 'bad request url');
+    // 桥仍然可用：正常 Host 的请求照常 200
+    const ok = await postJson(env.port, `${POCKET_RPC_CHANNEL}/${POCKET_ENDPOINTS.status}`, { rpcId: 'r13', method: POCKET_ENDPOINTS.status, payload: {} });
+    assert.equal(ok.status, 200);
+  } finally { await env.stop(); }
+});
