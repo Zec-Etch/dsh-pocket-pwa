@@ -84,6 +84,30 @@ test('error objects never render as object Object or an empty message', () => {
   assert.match(pocketErrorText({}), /Operation failed/);
   assert.match(pocketErrorText(null), /Operation failed/);
 });
+for (const [name, code, message] of [
+  ['InvalidStateError', 'already-registered', /无需重复注册/],
+  ['NotAllowedError', 'registration-cancelled', /取消、超时或未获授权/],
+  ['AbortError', 'registration-cancelled', /取消、超时或未获授权/],
+  [undefined, 'register-failed', /Operation failed/],
+]) test('registration rejection is actionable: ' + (name || 'empty object'), async () => {
+  const calls = [];
+  const window = { __DSH_POCKET_CFG__: { passkey: true }, PublicKeyCredential() {}, addEventListener() {} };
+  runInNewContext(POCKET_PWA_JS, { window, navigator: { credentials: { create: async ({ publicKey }) => {
+    assert.equal(publicKey.excludeCredentials.length, 1);
+    throw name ? { name, message: 'opaque browser error' } : {};
+  } } }, btoa, atob, Uint8Array, ArrayBuffer, fetch: async (url) => {
+    calls.push(url);
+    return { ok: true, json: async () => ({ flowId: 'flow', challenge: expected, rp: {}, user: { id: expected },
+      excludeCredentials: [{ type: 'public-key', id: expected }] }) };
+  } });
+  const result = await window.dshPocketPasskey.register('phone');
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, code);
+  assert.match(result.error.message, message);
+  assert.ok(!result.error.message.includes('opaque browser error'));
+  assert.equal(calls.length, 1, 'rejected registration never submits finish or changes credentials');
+});
+
 test('PWA script does not add a floating registration bar or modify the host DOM', () => {
   assert.ok(!POCKET_PWA_JS.includes('document.createElement'));
   assert.ok(!POCKET_PWA_JS.includes('dsh-pocket-passkey-bar'));
