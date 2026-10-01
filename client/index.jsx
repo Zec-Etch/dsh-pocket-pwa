@@ -1,16 +1,15 @@
 // dsh-pocket 网页客户端：
 //   1. 设置页签「手机访问」（局域网/公网二维码 + 更新/重启提示）
-//   2. 移动端适配（移植自 MIT 项目 dsh-web-mobile，见 client/mobile/LICENSE.dsh-web-mobile）
 //
-// 手机扫码打开的就是电脑上的 dsh web，实时同步；窄屏自动变成抽屉布局。
+// 手机扫码打开的就是电脑上的 dsh web，实时同步；布局与交互保持官方 WebUI 原样。
 //
 // 注：本页的 Web Push 走宿主注入的 window.dshPocketPush（/pocket-pwa.js）——
 // 订阅/取消必须在用户手势里发起，通知本身由宿主的 /sw.js 显示。
 
+import { pocketErrorText } from '../lib/passkey-client.mjs';
 import { createElement as h, useEffect, useRef, useState } from 'react';
 
-import { POCKET_RPC_CHANNEL, POCKET_ENDPOINTS, MOBILE_RIGHTBAR_ATTRIBUTE, MOBILE_RIGHTBAR_EVENT, redactStatus, compareVersions, buildAccessUrl } from './api.js';
-import { mobileApply } from './mobile/mobile-apply.tsx';
+import { POCKET_RPC_CHANNEL, POCKET_ENDPOINTS, redactStatus, compareVersions, buildAccessUrl } from './api.js';
 import { NS as POCKET_NS, zh as POCKET_ZH, en as POCKET_EN } from './pocket-locales.js';
 
 const name = 'dsh-pocket';
@@ -107,12 +106,6 @@ function detectWebAuthn() {
   }
 }
 
-function applyMobileRightbarSetting(enabled) {
-  const on = enabled !== false;
-  document.body?.setAttribute(MOBILE_RIGHTBAR_ATTRIBUTE, on ? 'on' : 'off');
-  window.dispatchEvent(new CustomEvent(MOBILE_RIGHTBAR_EVENT, { detail: { enabled: on } }));
-}
-
 function PocketSettingsTab({ rpcCall, t }) {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -140,7 +133,6 @@ function PocketSettingsTab({ rpcCall, t }) {
     try {
       const s = await call(POCKET_ENDPOINTS.status, {});
       setStatus(s);
-      applyMobileRightbarSetting(s.mobileRightbarEnabled);
       setTunnelState(s.tunnelState ?? null);
       // 宿主注入的 /pocket-pwa.js 可能比本组件晚到：每轮轮询都重探一次浏览器能力
       refreshBrowserCapabilities();
@@ -325,7 +317,6 @@ function PocketSettingsTab({ rpcCall, t }) {
     try {
       const next = await call(POCKET_ENDPOINTS.pocketReset, { confirm: true });
       setStatus(next);
-      applyMobileRightbarSetting(next.mobileRightbarEnabled);
       setTunnelCfg(null);
       setCustomPin(null);
       setAdvOpen(false);
@@ -352,17 +343,6 @@ function PocketSettingsTab({ rpcCall, t }) {
       const r = await call(POCKET_ENDPOINTS.lanAuthSetEnabled, { on });
       setStatus((s) => ({ ...s, lanAuthEnabled: r.lanAuthEnabled }));
     } catch { /* 忽略 */ }
-  };
-
-  const setMobileRightbar = async (on) => {
-    try {
-      const r = await call(POCKET_ENDPOINTS.mobileRightbarSetEnabled, { on });
-      const enabled = r.mobileRightbarEnabled === true;
-      setStatus((s) => ({ ...s, mobileRightbarEnabled: enabled }));
-      applyMobileRightbarSetting(enabled);
-    } catch (err) {
-      setError(err.message);
-    }
   };
 
   // 局域网访问总开关：关闭后局域网扫码/链接直接失效（公网不受影响）。
@@ -441,7 +421,7 @@ function PocketSettingsTab({ rpcCall, t }) {
   const namedActive = namedMode || tunnelCfg !== null;
   // 后端错误消息统一为「中文 | English」混排；按当前界面语言只显示对应一半
   const errText = (msg) => {
-    const s = String(msg ?? '');
+    const s = msg == null ? '' : pocketErrorText(msg);
     const i = s.indexOf(' | ');
     if (i < 0) return s;
     return (t('ok') === POCKET_ZH.ok ? s.slice(0, i) : s.slice(i + 3)).trim();
@@ -767,7 +747,7 @@ function PocketSettingsTab({ rpcCall, t }) {
         : t('notifyTestSent'));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, 'notifyTestFailed', { err: errText(err?.message) || t('unknownError') }));
+      showToast(fmt(t, 'notifyTestFailed', { err: errText(err) || t('unknownError') }));
     } finally {
       setNotifyBusy(false);
     }
@@ -837,7 +817,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(t('notifySubscribed'));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, 'notifySubscribeFailed', { err: errText(err?.message) || t('unknownError') }));
+      showToast(fmt(t, 'notifySubscribeFailed', { err: errText(err) || t('unknownError') }));
     } finally {
       setNotifyBusy(false);
     }
@@ -852,7 +832,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(t('notifyUnsubscribed'));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, 'notifyUnsubscribeFailed', { err: errText(err?.message) || t('unknownError') }));
+      showToast(fmt(t, 'notifyUnsubscribeFailed', { err: errText(err) || t('unknownError') }));
     } finally {
       setNotifyBusy(false);
     }
@@ -866,7 +846,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(t('notifyCleared'));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, 'notifyClearFailed', { err: errText(err?.message) || t('unknownError') }));
+      showToast(fmt(t, 'notifyClearFailed', { err: errText(err) || t('unknownError') }));
     } finally {
       setNotifyBusy(false);
     }
@@ -886,7 +866,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       }
       showToast(t('pwaInstallTriggered'));
     } catch (err) {
-      showToast(fmt(t, 'notifySubscribeFailed', { err: errText(err?.message) || t('unknownError') }));
+      showToast(fmt(t, 'notifySubscribeFailed', { err: errText(err) || t('unknownError') }));
     }
   };
   /** PWA 不可安装时的简短原因（非 HTTPS / 不支持 / 已安装 / 还没准备好）。 */
@@ -915,7 +895,7 @@ function PocketSettingsTab({ rpcCall, t }) {
   const webAuthn = detectWebAuthn();
 
   // 在本设备注册通行密钥：调用宿主注入脚本暴露的 window.dshPocketPasskey.register()。
-  // 入口放在设置页里（登录后的横幅可能被关掉，用户就再也找不到注册入口了）。
+  // 入口仅放在插件设置页，不向官方会话界面添加悬浮横幅。
   const registerThisDevice = async () => {
     const api = typeof window !== 'undefined' ? window.dshPocketPasskey : null;
     if (typeof api?.register !== 'function') {
@@ -933,7 +913,7 @@ function PocketSettingsTab({ rpcCall, t }) {
         setRegMsg({ ok: false, text: errText(r?.error?.message ?? r?.error) || t('unknownError') });
       }
     } catch (err) {
-      setRegMsg({ ok: false, text: errText(err?.message) || t('unknownError') });
+      setRegMsg({ ok: false, text: errText(err) || t('unknownError') });
     } finally {
       setRegBusy(false);
     }
@@ -1211,14 +1191,6 @@ function PocketSettingsTab({ rpcCall, t }) {
         : null,
     ),
 
-    h('div', { style: styles.block },
-      row(
-        t('mobileRightbar'),
-        Switch(status?.mobileRightbarEnabled !== false, () => setMobileRightbar(status?.mobileRightbarEnabled === false)),
-        h('div', { style: { ...styles.muted, marginTop: 6 } }, t('mobileRightbarHint')),
-      ),
-    ),
-
     // 通知与 PWA（task-6）：Web Push 订阅 + Webhook；旧宿主不返回 notify 字段时降级提示
     h('div', { style: styles.block },
       h('span', { style: { fontWeight: 600, fontSize: 13 } }, t('notifyTitle')),
@@ -1313,7 +1285,7 @@ function PocketSettingsTab({ rpcCall, t }) {
             // 三态说明：非安全上下文 → 浏览器不支持 → 可用
             h('div', { style: { marginTop: 6, fontSize: 12, lineHeight: 1.5, color: (!webAuthn.secure || !webAuthn.supported) ? COLOR_ERR : 'var(--dsw-alias-label-tertiary,#8b93a1)' } },
               !webAuthn.secure ? t('passkeyInsecure') : (!webAuthn.supported ? t('passkeyUnsupported') : t('passkeySecureHint'))),
-            // 在本设备注册通行密钥：入口常驻设置页（登录后的提示横幅可被关闭，关掉就找不到了）
+            // 在本设备注册通行密钥：入口仅位于插件设置页
             (webAuthn.secure && webAuthn.supported && passkeyView.enabled === true)
               ? row(t('passkeyRegister'),
                 h('button', { style: styles.smallBtn, onClick: registerThisDevice, disabled: regBusy },
@@ -1434,21 +1406,6 @@ function PocketSettingsTab({ rpcCall, t }) {
 }
 
 export function apply(ctx) {
-  // 兜底：确保 connection.isLoopback 为 true（issue #58）。
-  // 注：代理注入的 loopback 补丁（proxy.mjs LOOPBACK_ENV_PATCH）已在 #105 移除——
-  // 它与 DSH Desktop 2.0.4+ 客户端运行时不兼容，会令 BootHandoff 阶段白屏。
-  // #58「远程浏览器开设置页」需上游提供官方信任来源机制才能正经解决；此处仅保留兜底。
-  if (ctx?.connection) {
-    try {
-      Object.defineProperty(ctx.connection, 'isLoopback', { value: true, writable: true, configurable: true });
-    } catch {
-      try { ctx.connection.isLoopback = true; } catch { /* 忽略 */ }
-    }
-  }
-
-  // 移动端适配（dsh-web-mobile 移植）：抽屉布局/触控/安全区，仅窄屏生效
-  mobileApply(ctx);
-
   const rpcCall = (endpoint, payload, signal) =>
     ctx.connection.rpc.call(POCKET_RPC_CHANNEL, endpoint, payload, signal);
 

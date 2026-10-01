@@ -242,7 +242,7 @@ test('打包产物（task-19）：client.js 带上 redactSsh 的新字段名与�
   }
   // 包装模板没被破坏（与 client/build.mjs 逐字一致的头尾）
   assert.ok(bundle.startsWith('window.__ModuleLoader__.load({'), '打包产物必须是 ModuleLoader 包装');
-  assert.ok(bundle.includes('var React = require("react");'), 'React 绑定注释与语句必须保留');
+  assert.ok(bundle.includes('require("react")'), '设置页仍通过宿主模块系统加载 React');
   assert.ok(bundle.trimEnd().endsWith('});'), '包装结尾完整');
 });
 
@@ -463,7 +463,7 @@ const FULL_STATUS = {
   tunnelState: { phase: 'idle' }, tunnelConfig: { mode: 'ssh', hostname: '', tokenSet: false },
   dshPort: 3080, desktop: false, restartNotice: false, killHint: 'lsof -ti :3080 | xargs kill -9',
   accessToken: 'PIN12345', lanToken: 'LAN12345', lanAuthEnabled: true, lanEnabled: true,
-  mobileRightbarEnabled: true, publicPinCustom: false, lanPinCustom: false,
+  publicPinCustom: false, lanPinCustom: false,
   ssh: {
     running: true, state: 'connected', url: 'https://dsh.example.com', qr: 'data:qr-ssh', lastError: null,
     config: { host: 'vps.example.com', port: 22, user: 'dsh', keyPathSet: true, remoteBindPort: 7788, accessProtocol: 'https', accessHost: 'dsh.example.com', accessPort: 0, autoRestore: true },
@@ -479,7 +479,7 @@ const LEGACY_STATUS = {
   tunnelState: { phase: 'idle' }, tunnelConfig: { mode: 'quick', hostname: '', tokenSet: false },
   dshPort: 3080, desktop: false, restartNotice: false, killHint: 'x',
   accessToken: null, lanToken: 'LAN12345', lanAuthEnabled: true, lanEnabled: true,
-  mobileRightbarEnabled: true, publicPinCustom: false, lanPinCustom: false,
+  publicPinCustom: false, lanPinCustom: false,
 };
 
 function fullRpc(endpoint) {

@@ -3,13 +3,6 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
-    // The DSH client module system provides react as a module, never as a
-    // global. esbuild keeps react external (see the build config above) and
-    // its classic JSX transform emits bare React.createElement calls for the
-    // mobile components (which import only named hooks, not React itself), so
-    // the bundle must bind React itself - otherwise every mobile component
-    // crashes at render time with "ReferenceError: React is not defined".
-    var React = require("react");
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -37,12 +30,68 @@ __export(index_exports, {
   redactStatus: () => redactStatus
 });
 module.exports = __toCommonJS(index_exports);
-var import_react2 = require("react");
+
+// lib/passkey-client.mjs
+function pocketErrorText(error, fallback = "\u64CD\u4F5C\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5 | Operation failed \u2014 please retry") {
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (error && typeof error === "object") {
+    if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
+    if (error.error && error.error !== error) return pocketErrorText(error.error, fallback);
+    if (typeof error.name === "string" && error.name.trim()) return error.name.trim();
+    if (typeof error.code === "string" && error.code.trim()) return error.code.trim();
+  }
+  return fallback;
+}
+function pocketCredentialToJSON(credential, ceremony) {
+  if (!credential) throw new Error("\u9A8C\u8BC1\u5DF2\u53D6\u6D88\uFF0C\u8BF7\u91CD\u8BD5 | Verification cancelled \u2014 please retry");
+  let json = {};
+  try {
+    if (typeof credential.toJSON === "function") json = credential.toJSON() || {};
+  } catch {
+  }
+  const response = credential.response || {};
+  const encoded = json.response || {};
+  const bytes = (value) => {
+    if (typeof value === "string") return /^[A-Za-z0-9_-]+$/.test(value) ? value : "";
+    let view;
+    if (ArrayBuffer.isView(value)) view = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    else if (Object.prototype.toString.call(value) === "[object ArrayBuffer]") view = new Uint8Array(value);
+    else return "";
+    let text = "";
+    for (let i = 0; i < view.length; i++) text += String.fromCharCode(view[i]);
+    return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  };
+  const required = (field, value) => {
+    if (!value) throw new Error("\u6D4F\u89C8\u5668\u8FD4\u56DE\u7684\u901A\u884C\u5BC6\u94A5\u7F3A\u5C11 " + field + "\uFF0C\u8BF7\u91CD\u8BD5\u6216\u66F4\u65B0\u6D4F\u89C8\u5668 | Passkey response is missing " + field + " \u2014 retry or update your browser");
+    return value;
+  };
+  const rawId = required("rawId", bytes(credential.rawId) || bytes(json.rawId) || bytes(credential.id) || bytes(json.id));
+  const result = { id: rawId, rawId, type: credential.type || json.type || "public-key", response: {} };
+  if (result.type !== "public-key") throw new Error("\u901A\u884C\u5BC6\u94A5\u7C7B\u578B\u65E0\u6548 | Invalid passkey type");
+  const fields = ceremony === "register" ? ["clientDataJSON", "attestationObject"] : ["clientDataJSON", "authenticatorData", "signature"];
+  for (const field of fields) {
+    result.response[field] = required(field, bytes(response[field]) || bytes(encoded[field]));
+  }
+  if (ceremony === "register") {
+    let transports = encoded.transports;
+    try {
+      if (typeof response.getTransports === "function") transports = response.getTransports();
+    } catch {
+    }
+    result.response.transports = Array.isArray(transports) ? [...new Set(transports.filter((v) => typeof v === "string"))] : [];
+  } else {
+    result.response.userHandle = bytes(response.userHandle) || bytes(encoded.userHandle) || null;
+  }
+  return result;
+}
+var PASSKEY_CLIENT_HELPERS_SRC = `${pocketErrorText.toString()}
+${pocketCredentialToJSON.toString()}`;
+
+// client/index.jsx
+var import_react = require("react");
 
 // client/api.js
 var POCKET_RPC_CHANNEL = "/dsh-pocket";
-var MOBILE_RIGHTBAR_ATTRIBUTE = "data-dsh-pocket-mobile-rightbar";
-var MOBILE_RIGHTBAR_EVENT = "dsh-pocket:mobile-rightbar";
 var POCKET_ENDPOINTS = Object.freeze({
   status: "pocket.status",
   tunnelStart: "tunnel.start",
@@ -55,7 +104,6 @@ var POCKET_ENDPOINTS = Object.freeze({
   lanAuthSetEnabled: "lanAuth.setEnabled",
   lanSetOverride: "lan.setOverride",
   lanSetEnabled: "lan.setEnabled",
-  mobileRightbarSetEnabled: "mobile.rightbar.setEnabled",
   pinSetCustom: "pin.setCustom",
   pocketReset: "pocket.reset",
   // 移动端「复制文件内容」（issue #17）：手机经此 RPC 让主机读取文件正文，
@@ -214,1800 +262,9 @@ function redactStatus(s) {
   };
 }
 
-// client/mobile/icons.tsx
-function baseProps(size) {
-  return {
-    width: size,
-    height: size,
-    viewBox: "0 0 16 16",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.4,
-    strokeLinecap: "round",
-    strokeLinejoin: "round"
-  };
-}
-function IconPanelLeft({ size = 16 }) {
-  return /* @__PURE__ */ React.createElement("svg", { ...baseProps(size) }, /* @__PURE__ */ React.createElement("rect", { x: "2.5", y: "3.5", width: "11", height: "9", rx: "1.5" }), /* @__PURE__ */ React.createElement("path", { d: "M6.5 3.5v9" }));
-}
-function IconFolderOpen({ size = 16 }) {
-  return /* @__PURE__ */ React.createElement("svg", { ...baseProps(size) }, /* @__PURE__ */ React.createElement("path", { d: "M2.5 5.2a1 1 0 0 1 1-1h2.9l1.2 1.5h4.9a1 1 0 0 1 1 1v.8" }), /* @__PURE__ */ React.createElement("path", { d: "M2.5 5.2v6.1a1 1 0 0 0 1 1h8.6a1 1 0 0 0 1-1l.9-4.3H4.3a1 1 0 0 0-1 .8z" }));
-}
-function IconDownload({ size = 16 }) {
-  return /* @__PURE__ */ React.createElement("svg", { ...baseProps(size) }, /* @__PURE__ */ React.createElement("path", { d: "M8 3v6.3" }), /* @__PURE__ */ React.createElement("path", { d: "M5.6 7.4 8 9.8l2.4-2.4" }), /* @__PURE__ */ React.createElement("path", { d: "M3.5 12.6h9" }));
-}
-
-// client/mobile/MobileNavToggle.tsx
-function MobileNavToggle({ toggleSidebar, t }) {
-  const toggleExplorer = () => {
-    const frame = document.querySelector('[data-mobile-nav="frame"]');
-    if (frame === null) return;
-    if (frame.hasAttribute("data-aionui-explorer-open")) {
-      frame.removeAttribute("data-aionui-explorer-open");
-    } else {
-      frame.setAttribute("data-aionui-explorer-open", "");
-    }
-  };
-  return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      "data-mobile-nav": "toggle",
-      "aria-label": t("open"),
-      title: t("open"),
-      onClick: () => toggleSidebar()
-    },
-    /* @__PURE__ */ React.createElement(IconPanelLeft, { size: 16 })
-  ), /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      "data-mobile-nav": "files",
-      "aria-label": t("files"),
-      title: t("files"),
-      onClick: toggleExplorer
-    },
-    /* @__PURE__ */ React.createElement(IconFolderOpen, { size: 16 })
-  ));
-}
-
-// client/mobile/MobileNavOverlay.tsx
-var import_react = require("react");
-
-// client/mobile/nav-targets.mjs
-var DRAWER_SELECTOR = '[data-mobile-nav="frame"] > :first-child';
-var TOGGLE_SELECTOR = '[data-mobile-nav="toggle"]';
-var NAV_TARGETS = [
-  "button[data-dsh-taskboard-entry]",
-  "button[data-dsh-ssh-entry]",
-  // 抽屉底部的 "文件" 入口打开的是 dsh-web-ui 的 explorer 面板，它的 z-index
-  // (55) 低于展开的抽屉 (600)，且在抽屉 DOM 之外：抽屉不关就会盖住面板，点
-  // 面板里的行又会被"点抽屉外就关"吃掉。所以按导航处理，一起关掉。
-  '[data-mobile-nav="files"]',
-  '[class*="sessionRow"]',
-  '[class*="newSession"]',
-  '[class*="searchResultWorkspace"]',
-  '[class*="searchResultRow"]'
-].join(", ");
-var NAV_EXCLUDE = '[class*="sessionRow"] button';
-var OVERLAY_SELECTOR = [
-  '[role="menu"]',
-  '[role="listbox"]',
-  '[role="dialog"]',
-  '[role="tooltip"]',
-  "[data-radix-popper-content-wrapper]"
-].join(", ");
-function navTargetFor(target) {
-  if (target == null || typeof target.closest !== "function") return null;
-  if (target.closest(NAV_EXCLUDE) !== null) return null;
-  return target.closest(NAV_TARGETS);
-}
-function isOverlayTap(target) {
-  if (target == null || typeof target.closest !== "function") return false;
-  return target.closest(OVERLAY_SELECTOR) !== null;
-}
-
-// client/mobile/MobileNavOverlay.tsx
-var MOBILE_QUERY = "(max-width: 1023px)";
-function useMobile() {
-  const [mobile, setMobile] = (0, import_react.useState)(() => window.matchMedia(MOBILE_QUERY).matches);
-  (0, import_react.useEffect)(() => {
-    const query = window.matchMedia(MOBILE_QUERY);
-    const onChange = (event) => setMobile(event.matches);
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
-  }, []);
-  return mobile;
-}
-function findFrame() {
-  return document.querySelector("[data-shell-overlay]")?.parentElement ?? null;
-}
-function MobileNavOverlay({ toggleSidebar, t }) {
-  const mobile = useMobile();
-  const [open, setOpen] = (0, import_react.useState)(false);
-  const [fabVisible, setFabVisible] = (0, import_react.useState)(false);
-  (0, import_react.useLayoutEffect)(() => {
-    if (!mobile) {
-      setOpen(false);
-      return;
-    }
-    const frame = findFrame();
-    if (frame === null) return;
-    frame.setAttribute("data-mobile-nav", "frame");
-    const sync = () => setOpen(!frame.hasAttribute("data-sidebar-collapsed"));
-    sync();
-    const observer = new MutationObserver(sync);
-    observer.observe(frame, { attributes: true, attributeFilter: ["data-sidebar-collapsed"] });
-    return () => {
-      observer.disconnect();
-      frame.removeAttribute("data-mobile-nav");
-    };
-  }, [mobile]);
-  (0, import_react.useEffect)(() => {
-    if (!mobile) {
-      setFabVisible(false);
-      return;
-    }
-    const sync = () => setFabVisible(document.querySelector('[data-phase="active"]') === null);
-    sync();
-    const observer = new MutationObserver(sync);
-    observer.observe(document.documentElement, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ["data-phase"]
-    });
-    return () => observer.disconnect();
-  }, [mobile]);
-  (0, import_react.useEffect)(() => {
-    if (!mobile || !open) return;
-    const onKeyDown = (event) => {
-      if (event.key === "Escape" && document.querySelector('[aria-modal="true"]') === null) toggleSidebar();
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [mobile, open, toggleSidebar]);
-  (0, import_react.useEffect)(() => {
-    if (!mobile || !open) return;
-    let lastTouchNavAt = 0;
-    let lastTouchX = 0;
-    let lastTouchY = 0;
-    let suppressTouchClickUntil = 0;
-    let pendingTouchRow = null;
-    let selectedRowAtArm = null;
-    let navClickArrived = false;
-    let navObserver = null;
-    let navTimer = null;
-    const drawerRoot = () => document.querySelector(DRAWER_SELECTOR);
-    const disarmNav = () => {
-      navObserver?.disconnect();
-      navObserver = null;
-      if (navTimer !== null) window.clearTimeout(navTimer);
-      navTimer = null;
-      pendingTouchRow = null;
-      selectedRowAtArm = null;
-      navClickArrived = false;
-    };
-    const armNav = (row) => {
-      disarmNav();
-      pendingTouchRow = row;
-      const drawer = drawerRoot();
-      selectedRowAtArm = drawer?.querySelector('[role="treeitem"][aria-selected="true"]') ?? null;
-      if (drawer === null) return;
-      navObserver = new MutationObserver(() => {
-        const frame = document.querySelector('[data-mobile-nav="frame"]');
-        if (frame === null || frame.hasAttribute("data-sidebar-collapsed")) {
-          disarmNav();
-          return;
-        }
-        const selectedRow = drawerRoot()?.querySelector('[role="treeitem"][aria-selected="true"]') ?? null;
-        if (navClickArrived && selectedRow !== null && selectedRow !== selectedRowAtArm) {
-          disarmNav();
-          toggleSidebar();
-        }
-      });
-      navObserver.observe(drawer, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["aria-selected"]
-      });
-      navTimer = window.setTimeout(disarmNav, 2e3);
-    };
-    const navigationTarget = (target) => {
-      if (document.querySelector('[aria-modal="true"]') !== null) return null;
-      const frame = document.querySelector('[data-mobile-nav="frame"]');
-      if (frame === null || frame.hasAttribute("data-sidebar-collapsed")) return null;
-      if (!(target instanceof Element)) return null;
-      const drawer = drawerRoot();
-      if (drawer === null || !drawer.contains(target)) return null;
-      return navTargetFor(target);
-    };
-    const isPendingTouchClick = (event) => {
-      const capabilities = event.sourceCapabilities;
-      if (capabilities?.firesTouchEvents === true) return true;
-      return Math.hypot(event.clientX - lastTouchX, event.clientY - lastTouchY) <= 24;
-    };
-    const onDrawerClick = (event) => {
-      if (performance.now() < suppressTouchClickUntil) return;
-      if (pendingTouchRow !== null && performance.now() - lastTouchNavAt < 500 && isPendingTouchClick(event)) {
-        const target = navigationTarget(event.target);
-        const row = target?.closest('[role="treeitem"]');
-        if (row !== null && row !== void 0) {
-          pendingTouchRow = row;
-          navClickArrived = true;
-          return;
-        }
-      }
-      if (navigationTarget(event.target) !== null) toggleSidebar();
-    };
-    const onDrawerPointerUp = (event) => {
-      if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
-      const target = navigationTarget(event.target);
-      if (target === null) return;
-      const row = target.closest('[role="treeitem"]');
-      if (row !== null) {
-        if (row.getAttribute("aria-selected") === "true") {
-          suppressTouchClickUntil = performance.now() + 500;
-          toggleSidebar();
-        } else {
-          lastTouchNavAt = performance.now();
-          lastTouchX = event.clientX;
-          lastTouchY = event.clientY;
-          armNav(row);
-        }
-        return;
-      }
-    };
-    document.addEventListener("click", onDrawerClick, true);
-    document.addEventListener("pointerup", onDrawerPointerUp, true);
-    return () => {
-      disarmNav();
-      document.removeEventListener("click", onDrawerClick, true);
-      document.removeEventListener("pointerup", onDrawerPointerUp, true);
-    };
-  }, [mobile, open, toggleSidebar]);
-  (0, import_react.useEffect)(() => {
-    if (!mobile || !open) return;
-    const onOutsideClick = (event) => {
-      if (document.querySelector('[aria-modal="true"]') !== null) return;
-      const target = event.target;
-      if (target === null) return;
-      if (target.closest(TOGGLE_SELECTOR) !== null) return;
-      if (isOverlayTap(target)) return;
-      const frame = document.querySelector('[data-mobile-nav="frame"]');
-      if (frame === null || frame.hasAttribute("data-sidebar-collapsed")) return;
-      const drawer = document.querySelector(DRAWER_SELECTOR);
-      if (drawer !== null && drawer.contains(target)) return;
-      toggleSidebar();
-    };
-    document.addEventListener("click", onOutsideClick, true);
-    return () => document.removeEventListener("click", onOutsideClick, true);
-  }, [mobile, open, toggleSidebar]);
-  if (!mobile) return null;
-  return /* @__PURE__ */ React.createElement(React.Fragment, null, open && /* @__PURE__ */ React.createElement("div", { "data-mobile-nav": "backdrop" }), fabVisible && !open && /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      "data-mobile-nav": "fab",
-      "aria-label": t("open"),
-      title: t("open"),
-      onClick: () => toggleSidebar()
-    },
-    /* @__PURE__ */ React.createElement(IconPanelLeft, { size: 18 })
-  ));
-}
-
-// client/mobile/MobileDrawerFooter.tsx
-function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSidebar, t }) {
-  const sessionId = useSessions((state) => state.current);
-  const openExplorer = () => {
-    document.querySelector('[data-mobile-nav="frame"]')?.setAttribute("data-aionui-explorer-open", "");
-    toggleSidebar();
-  };
-  return /* @__PURE__ */ React.createElement("div", { "data-mobile-nav": "drawer-actions" }, /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      "data-mobile-nav": "explorer",
-      "aria-label": t("files"),
-      title: t("files"),
-      onClick: openExplorer
-    },
-    /* @__PURE__ */ React.createElement(IconPanelLeft, { size: 14 }),
-    /* @__PURE__ */ React.createElement("span", null, t("files"))
-  ), /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      type: "button",
-      "data-mobile-nav": "session-log",
-      "aria-label": t("sessionLog"),
-      title: t("sessionLog"),
-      disabled: sessionId === void 0,
-      onClick: () => {
-        if (sessionId !== void 0) downloadSessionLog(sessionId);
-      }
-    },
-    /* @__PURE__ */ React.createElement(IconDownload, { size: 14 }),
-    /* @__PURE__ */ React.createElement("span", null, t("sessionLog"))
-  ));
-}
-
-// client/mobile/fileGuard.ts
-var GUARD_MSG = "\u624B\u673A\u4E0A\u65E0\u6CD5\u76F4\u63A5\u6253\u5F00\u7535\u8111\u4E0A\u7684\u6587\u4EF6";
-var WS_LABELS = ["\u6DFB\u52A0\u5DE5\u4F5C\u533A", "\u6DFB\u52A0\u5DE5\u4F5C\u533A\u2026", "Add workspace", "Add workspace\u2026"];
-var COPY_LABEL = "\u590D\u5236";
-function looksLikeFilePath(text) {
-  const t = (text ?? "").trim();
-  if (t.length < 3 || t.length > 320) return false;
-  if (/^(\/|~\/|\.\.?\/|[A-Za-z]:\\)/.test(t)) return true;
-  if (/\/[\w.\-]+\.\w{1,12}$/.test(t)) return true;
-  if (/[\w.\-]+\/[\w.\-]+\.\w{1,12}/.test(t)) return true;
-  return false;
-}
-async function copyText(text) {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.top = "-9999px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    const okCopy = document.execCommand("copy");
-    ta.remove();
-    return okCopy;
-  } catch {
-    return false;
-  }
-}
-function startFileGuard(readFile) {
-  let toastEl = null;
-  let toastTimer = null;
-  const showToast = (text) => {
-    if (toastEl === null) {
-      toastEl = document.createElement("div");
-      toastEl.setAttribute("data-mobile-nav", "file-guard-toast");
-      Object.assign(toastEl.style, {
-        position: "fixed",
-        left: "50%",
-        bottom: "64px",
-        transform: "translateX(-50%)",
-        maxWidth: "84vw",
-        zIndex: "9999",
-        padding: "10px 14px",
-        borderRadius: "10px",
-        background: "rgba(20,22,28,.92)",
-        color: "#fff",
-        fontSize: "13px",
-        lineHeight: "1.4",
-        textAlign: "center",
-        fontFamily: "inherit",
-        boxShadow: "0 4px 16px rgba(0,0,0,.28)",
-        pointerEvents: "none",
-        opacity: "0",
-        transition: "opacity .18s ease"
-      });
-      document.body.appendChild(toastEl);
-    }
-    toastEl.textContent = text;
-    requestAnimationFrame(() => {
-      if (toastEl !== null) toastEl.style.opacity = "1";
-    });
-    if (toastTimer !== null) window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => {
-      if (toastEl !== null) toastEl.style.opacity = "0";
-    }, 2600);
-  };
-  const onClick = (event) => {
-    const target = event.target;
-    if (target === null) return;
-    const el = target.closest("button, a");
-    if (el === null) return;
-    if (!looksLikeFilePath(el.textContent)) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    showToast(GUARD_MSG);
-  };
-  document.addEventListener("click", onClick, true);
-  const injectCopyButtons = () => {
-    const links = document.querySelectorAll("button, a");
-    links.forEach((el) => {
-      if (el.getAttribute("data-mobile-nav-copy") === "1") return;
-      const txt = (el.textContent ?? "").trim();
-      if (!looksLikeFilePath(txt)) return;
-      el.setAttribute("data-mobile-nav-copy", "1");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.setAttribute("data-mobile-nav", "copy-file");
-      btn.textContent = COPY_LABEL;
-      btn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const filePath = (el.textContent ?? "").trim();
-        btn.disabled = true;
-        btn.textContent = "\u2026";
-        try {
-          const res = await readFile(filePath);
-          if (!res?.ok) {
-            showToast(res?.error?.message ?? "\u590D\u5236\u5931\u8D25");
-            return;
-          }
-          const content = res.value?.content ?? "";
-          const copied = await copyText(content);
-          if (copied) {
-            const kb = Math.max(1, Math.round((res.value?.size ?? content.length) / 1024));
-            showToast(`\u5DF2\u590D\u5236\u6587\u4EF6\u5185\u5BB9\uFF08${kb} KB\uFF09`);
-          } else {
-            showToast("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9");
-          }
-        } catch (err) {
-          showToast(err instanceof Error ? err.message : "\u590D\u5236\u5931\u8D25");
-        } finally {
-          btn.disabled = false;
-          btn.textContent = COPY_LABEL;
-        }
-      });
-      el.parentElement?.insertBefore(btn, el.nextSibling);
-    });
-  };
-  injectCopyButtons();
-  const copyObserver = new MutationObserver(() => injectCopyButtons());
-  copyObserver.observe(document.body, { childList: true, subtree: true });
-  const hideWsEntries = () => {
-    const checkOne = (node) => {
-      if (node.nodeType !== 1) return;
-      const el = node;
-      const txt = (el.getAttribute("aria-label") ?? el.textContent ?? "").trim();
-      if (WS_LABELS.includes(txt)) {
-        el.style.display = "none";
-        el.setAttribute("data-mobile-nav-hide", "add-workspace");
-      }
-    };
-    const sel = '[role="menuitem"],[role="option"],li,button,a';
-    document.querySelectorAll(sel).forEach(checkOne);
-    const observer = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        m.addedNodes.forEach((n) => {
-          if (n.nodeType !== 1) return;
-          checkOne(n);
-          n.querySelectorAll?.(sel).forEach(checkOne);
-        });
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
-  };
-  const disconnectWs = hideWsEntries();
-  return () => {
-    document.removeEventListener("click", onClick, true);
-    copyObserver.disconnect();
-    disconnectWs();
-    if (toastTimer !== null) window.clearTimeout(toastTimer);
-    toastEl?.remove();
-  };
-}
-
-// client/mobile/mobile.css.ts
-var MOBILE_CSS = `
-/* ---------- base control styles (rendered at any width, hidden where unused) ---------- */
-
-[data-mobile-nav="toggle"],
-[data-mobile-nav="files"] {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary, inherit);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-[data-mobile-nav="toggle"]:hover,
-[data-mobile-nav="files"]:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .06));
-}
-[data-mobile-nav="toggle"]:focus-visible,
-[data-mobile-nav="files"]:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary, #4f6ef7);
-  outline-offset: 1px;
-}
-
-/* Drawer footer actions: the relocated Session log download plus the Files
-   action that opens the dsh-web-ui explorer sheet. */
-[data-mobile-nav="drawer-actions"] {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-/* \u5BBF\u4E3B\u6CA1\u6709 aionui explorer \u5217\uFF08\u5B98\u65B9 DSH \u65E0 dsh-web-ui\uFF0Cissue #48\uFF09\u65F6\u9690\u85CF
-   \u79FB\u52A8\u7AEF\u300C\u6587\u4EF6\u6D4F\u89C8\u300D\u5165\u53E3\uFF08header \u56FE\u6807 + drawer footer \u9879\uFF09\u2014\u2014\u4E0D\u7136\u70B9\u4E86\u6CA1\u53CD\u5E94\u3002 */
-[data-mobile-nav-explorer="0"] [data-mobile-nav="files"],
-[data-mobile-nav-explorer="0"] [data-mobile-nav="explorer"] {
-  display: none !important;
-}
-[data-mobile-nav="session-log"],
-[data-mobile-nav="explorer"] {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .12));
-  border-radius: 12px;
-  background: transparent;
-  color: var(--dsw-alias-label-primary, inherit);
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 20px;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-[data-mobile-nav="session-log"]:hover:not(:disabled),
-[data-mobile-nav="explorer"]:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .06));
-}
-[data-mobile-nav="session-log"]:disabled {
-  color: var(--dsw-alias-label-dimmed, rgba(0, 0, 0, .35));
-  cursor: default;
-}
-
-/* Floating fallback button (hero / blank phases without a session header).
-   The top clears the camera band below the status bar; when the client has
-   set viewport-fit=cover the safe-area inset moves it below the notch too. */
-[data-mobile-nav="fab"] {
-  position: absolute;
-  top: calc(env(safe-area-inset-top, 0px) + 72px);
-  left: 10px;
-  z-index: 21;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  padding: 0;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .12));
-  border-radius: 50%;
-  background: var(--dsw-alias-button-floating-fill, #ffffff);
-  color: var(--dsw-alias-label-primary, inherit);
-  cursor: pointer;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, .18);
-  -webkit-tap-highlight-color: transparent;
-}
-[data-mobile-nav="fab"]:hover {
-  background: var(--dsw-alias-button-floating-hover, rgba(0, 0, 0, .08));
-}
-[data-mobile-nav="fab"]:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary, #4f6ef7);
-  outline-offset: 2px;
-}
-
-/* Dimmed backdrop under the open drawer; above every column, below the drawer.
-   pointer-events: none \u2014\u2014 \u70B9\u51FB\u7A7F\u900F\uFF08issue #38\uFF09\uFF1Abackdrop \u53EA\u8D1F\u8D23\u89C6\u89C9\u538B\u6697\uFF0C
-   \u4E0D\u62A2\u70B9\u51FB\u3002\u5173\u95ED\u62BD\u5C49\u6539\u7531 MobileNavOverlay \u7684 document \u7EA7\u300C\u62BD\u5C49\u5916\u70B9\u51FB\u300D\u76D1\u542C\u5904\u7406
-   \uFF08\u7B49\u4EF7\u4E8E\u539F\u6765\u7684\u70B9\u51FB\u906E\u7F69\u5173\u95ED\uFF0C\u4E14\u62BD\u5C49\u5185\u70B9\u51FB\u4E0D\u518D\u88AB backdrop \u5403\u6389\uFF09\u3002 */
-[data-mobile-nav="backdrop"] {
-  position: absolute;
-  inset: 0;
-  z-index: 30;
-  background: rgba(0, 0, 0, .45);
-  pointer-events: none;
-  animation: dsh-mobile-nav-fade .2s var(--ds-ease-in-out, ease-in-out);
-  -webkit-tap-highlight-color: transparent;
-}
-@keyframes dsh-mobile-nav-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-/* Settings sheet entrance: the official dialog mounts with no animation at
-   all, so it snaps in. Fade + slight rise/scale reads as a proper sheet. */
-@keyframes dsh-mobile-nav-sheet-in {
-  from {
-    opacity: 0;
-    transform: translateY(14px) scale(.98);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-/* Preview sheet rise: the aionui preview column opens as a bottom sheet. */
-@keyframes dsh-mobile-nav-sheet-up {
-  from {
-    opacity: 0;
-    transform: translateY(28px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-/* ---------- mobile-only layout ---------- */
-
-@media (max-width: 1023px) {
-  /* --- Phone chrome ---
-     The system status bar stays visible (no fullscreen). Two adjustments
-     make it behave:
-     - touch-action: manipulation kills double-tap-to-zoom (and the 300ms
-       tap delay) while keeping pan and pinch zoom; the client also
-       suppresses legacy-iOS gesturestart as a fallback.
-     - With the client's viewport-fit=cover, env(safe-area-inset-top) is the
-       status bar / notch height; the rules below push the app content below
-       it so the status bar never covers anything. Off notched phones (or in
-       a normal browser tab where the layout viewport already sits below the
-       status bar) the inset is 0 and nothing shifts. */
-  html,
-  body {
-    touch-action: manipulation !important;
-  }
-
-  /* AppFrame: the drawer takes the sidebar column out of grid flow, so the
-     remaining in-flow items (center, details) land in tracks 1..2: give the
-     center every pixel and keep the details track at zero. The top padding
-     clears the status bar / notch for every in-flow surface (session header,
-     messages, composer); the absolutely-positioned drawer is unaffected (its
-     containing block is the frame's padding box, i.e. still the frame top). */
-  [data-mobile-nav="frame"] {
-    position: relative !important;
-    grid-template-columns: minmax(0, 1fr) 0 0 !important;
-    padding-top: env(safe-area-inset-top, 0px) !important;
-  }
-
-  /* \u4E3B\u5185\u5BB9\u5217\uFF08\u7B2C 2 \u4E2A\u7F51\u683C\u5B50\u5143\u7D20\uFF09\u5728\u5B98\u65B9\u6837\u5F0F\u91CC\u6709\u663E\u5F0F grid-column: 2\u2014\u2014
-     \u7F51\u683C\u88AB\u538B\u7F29\u6210 [1fr, 0, 0] \u540E\u5B83\u4F1A\u843D\u5728 0px \u7684\u7B2C 2 \u8F68\uFF0C\u6574\u4E2A\u4E3B\u754C\u9762\u88AB\u6324\u51FA
-     \u89C6\u53E3\uFF08\u53EA\u5269\u80CC\u666F\u56FE\uFF09\u3002\u5FC5\u987B\u663E\u5F0F\u628A\u5B83\u62C9\u56DE\u7B2C 1 \u8F68\uFF08issue #5\uFF09\u3002
-     \u7B2C 3 \u5217\uFF08details\uFF09\u4FDD\u6301 0 \u8F68\u5373\u53EF\uFF0C\u65E0\u9700\u5904\u7406\u3002 */
-  [data-mobile-nav="frame"] > :nth-child(2) {
-    grid-column: 1 !important;
-    grid-row: 1 !important;
-    min-width: 0 !important;
-  }
-
-  /* The sidebar column (first grid child) becomes a left drawer. The drawer
-     hugs the sidebar content exactly (the wide sidebar carries an inline
-     width, ~280px): a fixed 92vw box would leave a white strip where the
-     container background shows beside the content.
-     Closed state: translateX(-110%) \u2014 more than -100% of the max-content
-     width \u2014 guarantees the whole drawer (and its shadow, had it one) leaves
-     the viewport. A mere -100% leaves a sliver on screen; -105% (as used
-     before) left 14px of the drawer plus a long 32px-blur shadow gradient
-     visible along the left edge of the main UI. No box-shadow at all: the
-     dimmed backdrop already separates drawer from content.
-     Z-index note: the backdrop renders inside the shell's overlay layer
-     ([data-shell-overlay]), which forms its own stacking context. Third-party
-     plugins can force that layer up with !important (dsh-update-checker sets
-     it to 500), and when the layer outranks the drawer, the backdrop paints
-     ABOVE the drawer and swallows every tap \u2014 the drawer opens but no row
-     can be pressed (every tap just closes it). The drawer must therefore
-     outrank any such raise.
-     1200 (was 600) clears the mobile layers shipped by
-     @linxin666/dsh-web-ui-all \u2014 its sidebar pane is z-index 1100, its
-     details pane 1000 and its full-screen frame ::after mask 1050 (issue
-     #67: that mask sat on top of the 600 drawer and ate every tap). Still
-     far under the fixed-position banners/toasts (z 9999) that float at the
-     viewport level. */
-  [data-mobile-nav="frame"] > :first-child {
-    position: absolute !important;
-    inset: 0 auto 0 0 !important;
-    width: max-content !important;
-    max-width: 92vw !important;
-    z-index: 1200 !important;
-    transform: translateX(-110%);
-    transition: transform .28s var(--ds-ease-in-out, ease-in-out);
-    background: var(--dsw-alias-bg-base, #ffffff);
-    /* Keep the drawer's own content below the status bar / notch: the drawer
-       spans the full frame height (its absolute containing block is the
-       frame's padding box, so the frame's own safe-area padding does NOT
-       reach it). The drawer background paints the status-bar strip, which
-       the client's theme-color meta matches, so the strip reads seamless. */
-    padding-top: env(safe-area-inset-top, 0px) !important;
-    /* Kill the official sidebarCol right border: with the backdrop the edge
-       reads cleanly, and the settings dialog (width:100% of this box) stays
-       pixel-flush with the drawer. */
-    border-right: none !important;
-  }
-
-  /* Expanded state (frame without data-sidebar-collapsed) slides the drawer in.
-     The open state must be transform:none \u2014 NOT translateX(0): an identity
-     transform still makes the drawer the containing block for fixed-position
-     descendants (the settings dialog's .VOzbGW_overlay is portaled into the
-     sidebar DOM). With the identity transform the wide settings sheet
-     (100vw-16) overflows the 280px drawer, the dialog's focus scrolls the
-     overflow:hidden drawer to scrollLeft=102, and every static child (plus the
-     fixed overlay) shifts 102px off-screen. With transform:none the overlay is
-     viewport-anchored: it dims the full screen and the sheet sits at left:8. */
-  [data-mobile-nav="frame"]:not([data-sidebar-collapsed]) > :first-child {
-    transform: none !important;
-  }
-
-  /* Kill a competing full-screen mask (issue #67).
-     @linxin666/dsh-web-ui-all ships its own mobile drawer, and part of it is
-
-       [data-dsh-frame]:not([data-sidebar-collapsed])::after {
-         content: ""; position: fixed; inset: 0; z-index: 1050;
-         background: rgb(0 0 0 / 24%);
-       }
-
-     The pseudo-element belongs to the frame we already mark, and the frame
-     carries only "position: relative" with z-index auto \u2014 no stacking context
-     \u2014 so this mask competes with the drawer in the parent stacking context
-     and, at 1050, paints over it. It covers the whole viewport, so every tap
-     on a session row lands on the mask instead: the drawer opens but nothing
-     inside it can be pressed, and the page behind cannot be scrolled.
-     Removing it is safe: the mobile stylesheet already renders its own
-     backdrop, and tapping outside the drawer is handled in JS.
-
-     The attribute selector is repeated on purpose. Their rule has the same
-     specificity (0,2,1) once ours is written the obvious way, and plugin
-     stylesheets are injected in load order, so a tie would be decided by
-     whichever plugin happened to load last. Doubling the attribute makes it
-     (0,3,1) and deterministic. */
-  [data-mobile-nav="frame"][data-mobile-nav="frame"]:not([data-sidebar-collapsed])::after {
-    content: none !important;
-  }
-
-  /* Drag handles are useless on touch and would float over the drawer. */
-  [data-side="sidebar"],
-  [data-side="details"] {
-    display: none !important;
-  }
-
-  /* --- Conversation text on mobile ---
-     The official message flow keeps desktop's 32px side gutters and 16px
-     type. On a phone: shrink the type a notch and widen the lines by
-     trimming the gutters (the sidebar drawer list keeps its size). The
-     flow's scroll container is the only _scroll element holding markdown
-     <p> paragraphs \u2014 the composer's own scroll (textarea) is excluded
-     via :has(p). */
-  /* The official main scroll body reserves scrollbar-gutter for desktop
-     scrollbars (8px), which shoves every column off-center on a phone.
-     Classic desktop scrollbars (Edge/Chrome) also occupy ~8-17px in a
-     phone-sized viewport, shifting the column further. Mobile scrolling
-     is touch/wheel, so remove the scrollbar entirely on phones: the
-     column is then exactly centered in every browser. */
-  [data-phase] [class$="_scrollBody"] {
-    scrollbar-gutter: auto !important;
-    scrollbar-width: none !important;
-  }
-  [data-phase] [class$="_scrollBody"]::-webkit-scrollbar {
-    display: none !important;
-    width: 0 !important;
-    height: 0 !important;
-  }
-  /* Message action rows (copy / run-time badges) can overflow the right
-     edge on narrow screens \u2014 keep them inside the message width. */
-  [data-phase] [class$="_actions"] {
-    overflow: hidden !important;
-  }
-  [data-phase] [class$="_actions"] [class$="_timeEnd"] {
-    flex: 0 1 auto !important;
-    min-width: 0 !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-    white-space: nowrap !important;
-  }
-
-  [data-phase] [class$="_scroll"]:has(p) {
-    padding-left: 20px !important;
-    padding-right: 20px !important;
-    font-size: 15px !important;
-  }
-  /* The official markdown styles set an explicit 16px on paragraphs and
-     list items, so the container's inherited 15px is not enough. User
-     messages render their text in a div whose class carries _text_
-     (16px too) \u2014 cover it as well. */
-  [data-phase] [class$="_scroll"]:has(p) p,
-  [data-phase] [class$="_scroll"]:has(p) li,
-  [data-phase] [class$="_scroll"]:has(p) [class*="_text_"] {
-    font-size: 15px !important;
-  }
-
-  /* Keep DSH's own process disclosures and their expand/collapse behaviour,
-     but remove desktop-sized vertical breathing room between consecutive
-     context, Skill, and system-prompt entries. */
-  [data-phase] [data-turn-process] {
-    height: 28px !important;
-    padding-bottom: 4px !important;
-    margin-bottom: 4px !important;
-  }
-  [data-phase] [data-turn-process][data-open] {
-    margin-bottom: 4px !important;
-  }
-  [data-phase] [data-disclosure-row] {
-    min-height: 24px !important;
-  }
-  [data-phase] :is([data-context-injection-body], [data-system-prompt-body]) {
-    margin-top: 2px !important;
-  }
-
-  /* --- Composer bottom row on mobile ---
-     Keep add, permission, model, reasoning and send controls on one line at
-     the Honor 50's 360px CSS viewport. DSH's stable data-composer-card hook
-     survives the editor's textarea -> contenteditable migration. */
-  [data-phase] [data-composer-card="true"] > [class$="_row"] {
-    flex-wrap: nowrap !important;
-    gap: 6px !important;
-  }
-  [data-phase] [data-composer-card="true"] > [class$="_row"] > :first-child {
-    gap: 8px !important;
-    min-width: 0 !important;
-  }
-  [data-phase] [data-composer-card="true"] > [class$="_row"] > :first-child > :nth-child(2) {
-    flex: 0 1 auto !important;
-    min-width: 0 !important;
-  }
-  [data-phase] [data-composer-card="true"] > [class$="_row"] > :last-child {
-    flex: 1 1 0 !important;
-    min-width: 0 !important;
-    gap: 6px !important;
-  }
-
-  /* --- Composer popups as bottom sheets on mobile ---
-     Two composer-anchored popups break on phones (field: bottom + side
-     cut, only part of the popup visible):
-     1. the model pill menu ([role=menu], max 360px, opens upward from the
-        pill inside the composer card);
-     2. the "/" command palette (max 320px card with the search box \u2014 it
-        hosts the /model popupSelect list: search + provider-grouped rows).
-     Both are position:absolute INSIDE the conversation scrollBody
-     (overflow:hidden) and the shell center column (overflow:hidden), so
-     the scroll containers clip them mid-list. Forensics showed neither
-     layer creates a containing block (no transform/contain/will-change),
-     so on mobile we snap whichever popup is open to a viewport-anchored
-     sheet: fixed positioning escapes the scroll clip entirely, width is
-     deterministic, safe-area keeps it off the gesture bar. A transient
-     picker covering the composer is standard mobile UX; selection or an
-     outside tap still dismisses it. */
-  [data-phase] [class$="_root"]:has(> [aria-haspopup="menu"]) > [role="menu"],
-  [data-phase] [class$="_card"]:has(> [class$="_search"]) {
-    position: fixed !important;
-    left: 12px !important;
-    right: 12px !important;
-    top: auto !important;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
-    width: auto !important;
-    min-width: 0 !important;
-    max-width: none !important;
-    max-height: min(65vh, 480px) !important;
-    max-height: min(65dvh, 480px) !important;
-    z-index: 130 !important;
-    border-radius: 14px !important;
-    box-shadow: 0 -4px 28px rgba(0, 0, 0, .18) !important;
-  }
-
-  /* --- Session header on mobile ---
-     Layout goal: [toggle] [session title] [mode badge] in a row. The optional
-     rightbar entry uses the shell's stable header-corner hook. */
-  [data-phase] header {
-    padding: 8px 12px 0 !important;
-  }
-  /* The directory and Files controls are absolutely positioned, so reserve
-     their lanes and let the title use the remaining width without squeezing. */
-  [data-phase] header > :first-child {
-    min-height: 36px !important;
-    padding: 0 32px !important;
-  }
-  [data-phase] header [class$="_titleCluster"],
-  [data-phase] header [class$="_crumbs"] {
-    min-width: 0 !important;
-  }
-  [data-phase] header button[class*="_crumb"] {
-    max-width: calc(100vw - 104px) !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-  }
-  /* The directory toggle sits at the far left of the header (the header
-     is position:relative; the data-slot wrappers are display:contents). */
-  [data-mobile-nav="toggle"] {
-    position: absolute !important;
-    left: 8px !important;
-    top: 12px !important;
-    z-index: 2 !important;
-  }
-  /* The Files action sits at the FAR RIGHT of the header so it reads as a
-     distinct control from the directory toggle on the left (which opens
-     the history sidebar). */
-  [data-mobile-nav="files"] {
-    position: absolute !important;
-    left: auto !important;
-    right: 8px !important;
-    top: 12px !important;
-    z-index: 2 !important;
-  }
-  /* The native rightbar entry is visible by default. Users who prefer the
-     compact header can turn it off in Pocket settings. */
-  body[data-dsh-pocket-mobile-rightbar="off"] [data-conversation-header-corner] {
-    display: none !important;
-  }
-  body:not([data-dsh-pocket-mobile-rightbar="off"]) [data-mobile-nav="files"] {
-    right: 44px !important;
-  }
-
-  /* --- Settings dialog on mobile ---
-     Desktop: 800px two-column flex (188px nav + content). Mobile: a
-     near-full-width sheet \u2014 nav tabs wrap into rows on top, option rows
-     stay horizontal (title+description left, control right). Structural
-     selectors are scoped to the unique aria-modal dialog; every
-     settings-specific rule is gated with
-     :has(> :first-child > :last-child > button) \u2014 the settings nav tab
-     list holds <button> tabs, so the transient export dialog (the same
-     primitives Modal, header(title+close)+description+body) keeps its
-     official centered card layout. Requires :has() support
-     (Chromium 105+, 2022). */
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) {
-    position: absolute !important;
-    left: 8px !important;
-    /* Fixed top (no translateY): a transform on the panel combined with the
-       panel overflowing the max-content drawer shifts the fixed overlay's
-       coordinate frame, dragging the whole sidebar content off-screen. The
-       safe-area inset keeps the sheet below the status bar / notch. */
-    top: calc(env(safe-area-inset-top, 0px) + 12px) !important;
-    width: calc(100vw - 16px) !important;
-    max-width: calc(100vw - 16px) !important;
-    /* Height follows the content (no dead space under a short page); it
-       caps at 100dvh-24 (less the safe-area top) and the options area
-       scrolls only then. */
-    height: auto !important;
-    max-height: min(800px, calc(100vh - 24px - env(safe-area-inset-top, 0px))) !important;
-    max-height: min(800px, calc(100dvh - 24px - env(safe-area-inset-top, 0px))) !important;
-    flex-direction: column !important;
-    border-radius: 14px !important;
-    animation: dsh-mobile-nav-sheet-in .22s var(--ds-ease-out, ease-in-out);
-  }
-  /* The settings sheet's dimmed mask fades in with the panel (the mask is
-     the first child of the overlay that directly contains the sheet). */
-  :has(> [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"]))) > :first-child {
-    animation: dsh-mobile-nav-fade .18s var(--ds-ease-out, ease-in-out);
-  }
-  @media (prefers-reduced-motion: reduce) {
-    [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])),
-    :has(> [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"]))) > :first-child {
-      animation: none !important;
-    }
-  }
-  /* The export dialog (not the settings sheet) must never overflow the
-     viewport: the official centered card can be wider than 390px. */
-  [aria-modal="true"]:not(:has(> :first-child > :last-child > button)) {
-    max-width: calc(100vw - 32px) !important;
-  }
-  /* Nav bar: hide the "Settings" caption (redundant on a full-width sheet)
-     and wrap the tab list so every tab is visible \u2014 a horizontal scroll cut
-     the last tab ("Plugins") off with no affordance to scroll. */
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :first-child {
-    width: 100% !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    gap: 6px !important;
-    padding: 10px 12px 8px !important;
-  }
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :first-child > :first-child {
-    display: none !important;
-  }
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :first-child > :last-child {
-    flex-direction: row !important;
-    flex-wrap: wrap !important;
-    width: 100% !important;
-    gap: 6px !important;
-    overflow: visible !important;
-  }
-  /* Content toolbar (Open configuration file + close): spread to the edges
-     instead of clustering right with a dead zone on the left. The toolbar
-     children carry official auto-margins that would defeat space-between,
-     so neutralize them. The close button gets a round tappable base so it
-     reads as its own control, not part of the outline button. */
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :last-child > :first-child {
-    justify-content: space-between !important;
-    align-items: center !important;
-    padding: 0 12px !important;
-    min-height: 40px !important;
-  }
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :last-child > :first-child > * {
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-  }
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :last-child > :first-child > :last-child {
-    width: 32px !important;
-    height: 32px !important;
-    border-radius: 50% !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .06)) !important;
-  }
-  /* Appearance mode cards: the official cube row renders three tall
-     vertical cards (~268px) that eat half the sheet. Turn them into a
-     compact horizontal trio (icon + label inline, equal widths).
-     Relies on the official cube-row class name of this version. */
-  [aria-modal="true"] [class$="_cubeRow"] {
-    gap: 6px !important;
-  }
-  [aria-modal="true"] [class$="_cubeRow"] > * {
-    flex: 1 1 0 !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    justify-content: center !important;
-    gap: 6px !important;
-    padding: 10px 8px !important;
-    min-height: 0 !important;
-  }
-  /* Content: the options scroll area gets bottom breathing room so the last
-     row never sits flush against the sheet's rounded corner. */
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :last-child {
-    flex: 1 1 auto !important;
-    min-height: 0 !important;
-  }
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :last-child > :last-child {
-    padding: 0 12px 24px !important;
-  }
-
-  /* ---------- dsh-web-ui family compatibility ----------
-     The linxin666 plugin suite extends the shell frame directly:
-       - aionui-panel appends two trailing grid columns (explorer / preview)
-         plus absolute drag handles to [data-dsh-frame]; its 5-track inline
-         grid is already overridden above, but the handles and columns would
-         still float over the main UI. On mobile the columns leave the grid
-         as floating bottom sheets and keep their own visibility state \u2014
-         the suite's collapse chevron / preview tabs still work, so no
-         feature is lost. The task-board / ssh plugins inject sidebar
-         entries and center-column takeover panels; the entries need
-         spacing and the kanban needs scrollable columns. */
-
-  /* Touch devices: the drag handles are useless \u2014 the floating expand
-     button is the opener. */
-  .aionui-explorer-handle,
-  .aionui-preview-handle {
-    display: none !important;
-  }
-
-  /* Shared base: both columns leave the grid as floating panels. The
-     explorer is gated shut by default (its own persisted expanded state
-     must never cover the mobile UI on load); the header Files action opens
-     it via the frame marker below, and the sheet's own collapse chevron
-     clears it. Preview stays owned by the suite (hidden while no tab is
-     open). The per-column rules below override the geometry. */
-  [data-aionui-explorer-col],
-  [data-aionui-preview-col] {
-    position: fixed !important;
-    z-index: 55 !important;
-    background: var(--aion-bg-base, #ffffff) !important;
-    border-left: none !important;
-  }
-  /* Explorer (file tree) bottom sheet: bottom edge aligned exactly with
-     the composer card's bottom line \u2014 the card sits 36px above the
-     viewport bottom (8px composer padding + the 28px stats strip below
-     the card), so the sheet uses the same 36px bottom offset. */
-  [data-aionui-explorer-col] {
-    visibility: hidden !important;
-    left: 8px !important;
-    right: 8px !important;
-    top: auto !important;
-    bottom: 36px !important;
-    width: auto !important;
-    height: min(55dvh, 460px) !important;
-    max-height: calc(100dvh - 44px) !important;
-    border-radius: 14px !important;
-    overflow: hidden !important;
-    box-shadow: 0 -4px 28px rgba(0, 0, 0, .18) !important;
-    animation: dsh-mobile-nav-sheet-up .24s var(--ds-ease-out, ease-in-out) !important;
-  }
-  /* Preview (file content) bottom sheet. Gated shut by default: the suite
-     persists open preview tabs in localStorage and restores them on load,
-     which would pop the sheet over the fresh UI. The client only sets the
-     frame marker after the user taps a file row in the explorer; the
-     suite's own collapse chevron clears it via the visibility watcher. */
-  [data-aionui-preview-col] {
-    visibility: hidden !important;
-    position: fixed !important;
-    left: 8px !important;
-    right: 8px !important;
-    top: auto !important;
-    bottom: 40px !important;
-    width: auto !important;
-    height: min(50dvh, 420px) !important;
-    max-height: calc(100dvh - 48px) !important;
-    border-radius: 14px !important;
-    overflow: hidden !important;
-    box-shadow: 0 -4px 28px rgba(0, 0, 0, .18) !important;
-    z-index: 56 !important;
-    animation: dsh-mobile-nav-sheet-up .24s var(--ds-ease-out, ease-in-out) !important;
-  }
-  /* User-opened preview sheet (frame marker, set on file-row tap). */
-  [data-mobile-nav="frame"][data-aionui-preview-open] [data-aionui-preview-col] {
-    visibility: visible !important;
-  }
-  /* The Files action opens the explorer sheet (frame marker). */
-  [data-mobile-nav="frame"][data-aionui-explorer-open] [data-aionui-explorer-col] {
-    visibility: visible !important;
-  }
-  /* The open drawer must never sit under a sheet: while the frame is in the
-     narrow-expanded state both sheets yield (later in the file than the
-     open marker rule, so it wins at equal specificity). */
-  [data-mobile-nav="frame"]:not([data-sidebar-collapsed]) [data-aionui-explorer-col],
-  [data-mobile-nav="frame"]:not([data-sidebar-collapsed]) [data-aionui-preview-col] {
-    visibility: hidden !important;
-  }
-  /* The suite's own expand button reads the store state we bypass on
-     mobile \u2014 hide it; the header Files action is the opener. */
-  .aionui-floating-expand {
-    display: none !important;
-  }
-
-  /* dsh-web-ui sidebar entries (task board / ssh) sit flush against each
-     other \u2014 give the injected rows breathing room. */
-  button[data-dsh-taskboard-entry],
-  button[data-dsh-ssh-entry] {
-    margin-bottom: 8px !important;
-  }
-
-  /* Task board: five kanban columns at minmax(0,1fr) crush into ~78px phone
-     strips. Give every column a usable minimum and let the row scroll. */
-  [data-dsh-taskboard-board] > [class$="_columns"] {
-    grid-template-columns: repeat(5, minmax(240px, 1fr)) !important;
-    overflow-x: auto !important;
-  }
-  /* The floating button must not float over a takeover panel (task board /
-     ssh own the center column while active). */
-  html[data-dsh-taskboard-active] [data-mobile-nav="fab"],
-  html[data-dsh-ssh-active] [data-mobile-nav="fab"],
-  html[data-dsh-taskboard-active] [data-mobile-nav="backdrop"],
-  html[data-dsh-ssh-active] [data-mobile-nav="backdrop"] {
-    display: none !important;
-  }
-  /* Board header: let the search field take the slack instead of squeezing
-     the action buttons. */
-  [data-dsh-taskboard-board] > [class$="_boardHeader"] [class$="_search"] {
-    flex: 1 1 auto !important;
-    min-width: 80px !important;
-  }
-
-  /* ---------- dsh-web-ui polish: plugin market search ----------
-     The market tab row (Discover / Themes / Installed + the plugin search
-     box) is a no-wrap flex: at 390px the tabs plus the ~218px search box
-     (~475px total) overflow the ~334px sheet and the search box runs off
-     the right edge of the screen (it also forces a horizontal scrollbar on
-     the sheet's options area). Let the row wrap: the tabs keep the first
-     line and the search box gets its own full-width second line. */
-
-  [aria-modal="true"] [class$="_tabs"] {
-    flex-wrap: wrap !important;
-    row-gap: 8px !important;
-  }
-  [aria-modal="true"] [class$="_searchInline"] {
-    flex: 1 1 100% !important;
-    width: 100% !important;
-    max-width: 100% !important;
-  }
-
-  /* ---------- dsh-usage-stats polish: usage & balance panel ----------
-     The panel's stats row shows three token counters side by side
-     (today / month / total). The counters use tabular nowrap figures whose
-     min-content width overflows the ~336px panel body on a phone: figures
-     clip at the row's edges and the panel grows a horizontal scrollbar.
-     Stack the three counters vertically \u2014 full-width rows, so the figures
-     always fit. */
-
-  [class*="usg_"][class$="_statsRow"] {
-    flex-direction: column !important;
-  }
-  [class*="usg_"][class$="_stat"] {
-    flex: 0 0 auto !important;
-    width: 100% !important;
-    min-width: 0 !important;
-  }
-
-  /* ---------- dsh-web-ui polish: settings sheet ----------
-     The official dialog is a desktop two-column form; on a phone the
-     label/control split leaves a huge dead gap and long descriptions wrap
-     into tall stacks. Stack each row (text above, control full-width) and
-     compact the nav tabs into an even wrap. */
-
-  /* Nav tabs: a stable 3-per-row grid (two clean rows instead of a ragged
-     wrap) with tighter cells. */
-  [aria-modal="true"]:has(> :first-child > :last-child > button):not(:has([role="navigation"])) > :first-child > :last-child {
-    display: grid !important;
-    grid-template-columns: repeat(3, 1fr) !important;
-    gap: 6px !important;
-  }
-  [aria-modal="true"] [class$="_navCell"] {
-    padding: 6px 8px !important;
-    gap: 6px !important;
-    font-size: 13px !important;
-    justify-content: flex-start !important;
-  }
-  [aria-modal="true"] [class$="_navCell"] svg {
-    width: 14px !important;
-    height: 14px !important;
-    flex: none !important;
-  }
-  /* Setting rows: text on top, control below at full width. */
-  [aria-modal="true"] [class$="_section"] [class$="_row"] {
-    flex-direction: column !important;
-    align-items: stretch !important;
-    gap: 8px !important;
-  }
-  [aria-modal="true"] [class$="_section"] [class$="_row"] > :first-child {
-    width: 100% !important;
-    max-width: none !important;
-  }
-  [aria-modal="true"] [class$="_section"] [class$="_row"] > :last-child {
-    width: 100% !important;
-    max-width: none !important;
-  }
-  /* Appearance mode group: give the cube row a consistent bordered
-     segmented look (the official borders differ per state). */
-  [aria-modal="true"] [class$="_cubeRow"] > * {
-    border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .12)) !important;
-  }
-
-  /* ---------- dsh-web-ui polish: explorer sheet ----------
-     The aionui explorer was designed for a desktop side column: compact the
-     header, search box and tree rows so a phone shows more entries, and pad
-     the scroll bottom so the last row never sits flush on the edge. */
-
-  [data-aionui-explorer-col] [class$="_tabBar"] {
-    height: 36px !important;
-  }
-  [data-aionui-explorer-col] [class$="_tabBtn"],
-  [data-aionui-explorer-col] [class$="_tabBtnActive"] {
-    padding: 0 12px !important;
-    font-size: 13px !important;
-  }
-  [data-aionui-explorer-col] [class$="_searchBox"] {
-    height: 32px !important;
-    font-size: 13px !important;
-  }
-  [data-aionui-explorer-col] [class$="_treeRow"] {
-    height: 30px !important;
-    font-size: 13px !important;
-  }
-  [data-aionui-explorer-col] [class$="_treeRow"] svg {
-    width: 14px !important;
-    height: 14px !important;
-  }
-  [data-aionui-explorer-col] [class$="_scrollArea"] {
-    padding-bottom: 28px !important;
-  }
-
-  /* ---------- dsh-web-ui polish: drawer footer ----------
-     The injected footer actions (Files + Session log) become two equal pill
-     buttons instead of text-width capsules. */
-
-  /* The official footerActions row also hosts the remote-web-ui entry
-     row (two icon buttons); without wrapping the two groups squeeze each
-     other on one line. Wrap so each group gets its own full-width row. */
-  [data-mobile-nav="frame"] [class$="_footerActions"] {
-    flex-wrap: wrap !important;
-    gap: 6px !important;
-  }
-  [data-mobile-nav="drawer-actions"] {
-    width: 100% !important;
-  }
-  [data-mobile-nav="drawer-actions"] > button {
-    flex: 1 1 0 !important;
-    padding: 0 8px !important;
-    white-space: nowrap !important;
-  }
-
-  /* ---------- dsh-web-ui polish: floating pet ----------
-     The whale-girl pet (dsh-pet) floats at the viewport corner with a
-     persisted, draggable position. On phones the pet is scaled down so
-     it does not dominate the screen; the plugin's own drag + persist
-     still work (the position itself is left alone \u2014 the mobile default
-     position is seeded via the pet API to just above the composer). */
-
-  body > [class$="_float"]:has([class$="_sprite"][role="button"]) {
-    transform: scale(.66);
-    transform-origin: bottom right;
-  }
-  /* While a modal dialog (settings sheet / export) owns the screen the pet
-     floats ABOVE it and covers the dialog content; modal semantics say the
-     background is inert, so hide the pet for the modal's lifetime. */
-  body:has([aria-modal="true"]) > [class$="_float"]:has([class$="_sprite"][role="button"]) {
-    display: none !important;
-  }
-
-  /* ---------- dsh-web-ui polish: conversation stats line ----------
-     The official session-status row (turns / steps / LLM time / TTFT /
-     cache) is long. The client marks the exact row with
-     [data-mobile-nav="stats"] (text-anchored, hashed classes can't be
-     targeted). Layout: ONE fixed-height (28px) flex strip that scrolls
-     horizontally \u2014 the full metrics stream stays reachable by swiping,
-     the row never grows vertically, no ellipsis or fade, 12px gaps
-     between metric groups, a 2px scrollbar as the swipe affordance. */
-
-  [data-mobile-nav="stats"] {
-    display: flex !important;
-    flex-flow: row nowrap !important;
-    align-items: center !important;
-    width: 100% !important;
-    max-width: 100% !important;
-    min-width: 0 !important;
-    height: 28px !important;
-    min-height: 28px !important;
-    max-height: 28px !important;
-    box-sizing: border-box !important;
-    white-space: nowrap !important;
-    overflow-x: auto !important;
-    overflow-y: hidden !important;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    scrollbar-width: thin !important;
-    scrollbar-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, .28)) transparent !important;
-    padding: 0 0 4px !important;
-    line-height: 20px !important;
-    font-size: 12px !important;
-  }
-  [data-mobile-nav="stats"]::-webkit-scrollbar {
-    height: 2px !important;
-  }
-  [data-mobile-nav="stats"]::-webkit-scrollbar-thumb {
-    background: var(--dsw-alias-label-tertiary, rgba(0, 0, 0, .3)) !important;
-    border-radius: 2px !important;
-  }
-  [data-mobile-nav="stats"]::-webkit-scrollbar-track {
-    background: transparent !important;
-  }
-  [data-mobile-nav="stats"] > * {
-    display: flex !important;
-    flex: 0 0 auto !important;
-    flex-flow: row nowrap !important;
-    align-items: center !important;
-    width: max-content !important;
-    min-width: max-content !important;
-    max-width: none !important;
-    white-space: nowrap !important;
-    margin-right: 12px !important;
-    padding: 0 !important;
-  }
-  [data-mobile-nav="stats"] > *:last-child {
-    margin-right: 0 !important;
-  }
-  [data-mobile-nav="stats"] * {
-    white-space: nowrap !important;
-  }
-
-  /* ---------- hero composer on mobile ----------
-     The official hero card carries a 2-line textarea plus a tall tool row,
-     which reads oversized on a phone. Tighten the empty-state rhythm: keep
-     the official centered hero, shrink the textarea line box, slim the card
-     padding and the tool row, and close the gap under the headline. */
-
-  [data-phase="hero"] [class$="_card"]:has(textarea) {
-    padding-top: 6px !important;
-    gap: 8px !important;
-  }
-  /* The official composer autosizes the textarea and writes an inline
-     height (2 lines on the hero empty state) on the textarea's scroll/grow
-     wrappers. :placeholder-shown lets us collapse the EMPTY state to one
-     line with !important; as soon as the user types, the pseudo-class no
-     longer matches and the autosizer's inline height takes over again \u2014 so
-     multi-line growth keeps working. */
-  [data-phase="hero"] textarea:placeholder-shown {
-    height: 28px !important;
-  }
-  [data-phase="hero"] [class$="_card"]:has(textarea:placeholder-shown) > [class$="_scroll"],
-  [data-phase="hero"] [class$="_card"]:has(textarea:placeholder-shown) [class$="_grow"] {
-    height: 28px !important;
-  }
-  [data-phase="hero"] [class$="_card"]:has(textarea) > [class$="_row"] {
-    padding-top: 2px !important;
-  }
-  [data-phase="hero"] [class$="_headline"] {
-    line-height: 1.15 !important;
-    margin-bottom: 0 !important;
-  }
-  [data-phase="hero"] [class$="_stack"] {
-    gap: 0 !important;
-  }
-
-  /* ---------- \u9690\u85CF\u300C\u6DFB\u52A0\u5DE5\u4F5C\u533A\u300D\u5165\u53E3\uFF08\u624B\u673A\u4E0A\u914D\u5DE5\u4F5C\u533A\u65E0\u610F\u4E49\uFF0Cissue #17 \u4FEE\u6B63\uFF09 ----------
-     \u56FE\u6807\u6309\u94AE\u7684 aria-label \u968F\u8BED\u8A00\u53D8\u5316\uFF08zh\u300C\u6DFB\u52A0\u5DE5\u4F5C\u533A\u300D/ en\u300CAdd workspace\u300D\uFF09\uFF0C
-     \u4E24\u79CD\u90FD\u8986\u76D6\uFF1B\u4E0B\u62C9\u83DC\u5355\u91CC\u7684\u300C\u6DFB\u52A0\u5DE5\u4F5C\u533A\u2026\u300D\u9879\u7531 fileGuard.ts \u7684 MutationObserver
-     \u6309\u6587\u6848\u515C\u5E95\u9690\u85CF\uFF08CSS \u9009\u4E0D\u5230\u7EAF\u6587\u672C\u8282\u70B9\uFF09\u3002\u53EA\u5728\u7A84\u5C4F\u751F\u6548\u2014\u2014\u684C\u9762\u7AEF\u7167\u5E38\u4FDD\u7559\u3002 */
-  button[aria-label="\u6DFB\u52A0\u5DE5\u4F5C\u533A"],
-  button[aria-label="\u6DFB\u52A0\u5DE5\u4F5C\u533A\u2026"],
-  button[aria-label="Add workspace"],
-  button[aria-label="Add workspace\u2026"] {
-    display: none !important;
-  }
-
-  /* ---------- \u6587\u4EF6\u94FE\u63A5\u65C1\u7684\u300C\u590D\u5236\u300D\u6309\u94AE\uFF08issue #17\uFF1A\u590D\u5236\u6587\u4EF6\u5185\u5BB9\uFF09 ----------
-     \u6302\u5728\u5BF9\u8BDD\u91CC\u7684\u6587\u4EF6\u94FE\u63A5\uFF08<button>/<a>\uFF0C\u6587\u6848\u5373\u8DEF\u5F84\uFF09\u7D27\u90BB\u4F4D\u7F6E\uFF0C\u7531 fileGuard.ts
-     \u6CE8\u5165\u3002\u53EA\u5C4F\u5185\u53EF\u89C1\uFF1A\u684C\u9762\u7AEF\u4E0D\u6CE8\u5165\u3001\u4E0D\u663E\u793A\uFF1B\u8FD9\u91CC\u518D\u515C\u5E95\u4E00\u5C42\uFF0C\u907F\u514D\u4EFB\u4F55\u9057\u6F0F\u3002
-     \u6587\u4EF6\u94FE\u63A5\u591A\u4E3A inline\uFF0C\u6309\u94AE\u7528 inline-flex \u7D27\u8DDF\u5176\u540E\u5373\u53EF\u3002 */
-  [data-mobile-nav="copy-file"] {
-    display: inline-flex !important;
-    align-items: center;
-    justify-content: center;
-    margin-left: 6px !important;
-    vertical-align: baseline !important;
-    height: 22px !important;
-    padding: 0 8px !important;
-    border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .14)) !important;
-    border-radius: 6px !important;
-    background: var(--dsw-alias-bg-layer-1, #fff) !important;
-    color: var(--dsw-alias-label-primary, inherit) !important;
-    font-family: inherit !important;
-    font-size: 11px !important;
-    line-height: 1 !important;
-    cursor: pointer !important;
-    -webkit-tap-highlight-color: transparent !important;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, .12) !important;
-  }
-  [data-mobile-nav="copy-file"]:active {
-    background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .06)) !important;
-  }
-  [data-mobile-nav="copy-file"][disabled] {
-    opacity: .55 !important;
-    cursor: default !important;
-  }
-}
-
-/* ---------- mobile: stop iOS Safari forced zoom on input focus ----------
- * Inputs are rendered with inline fontSize 13-14px, below the 16px threshold
- * that makes iOS Safari zoom the whole page on focus (and never recover).
- * Force the safe 16px minimum on narrow viewports only, so desktop keeps its
- * tighter metrics. !important is required to beat the inline styles. */
-@media (max-width: 1024px) {
-  input,
-  textarea,
-  [contenteditable="true"] {
-    font-size: 16px !important;
-  }
-}
-
-/* ---------- desktop: the mobile controls must never appear ---------- */
-
-@media (min-width: 1024px) {
-  [data-mobile-nav="toggle"],
-  [data-mobile-nav="files"],
-  [data-mobile-nav="fab"],
-  [data-mobile-nav="backdrop"],
-  [data-mobile-nav="session-log"],
-  [data-mobile-nav="explorer"],
-  [data-mobile-nav="drawer-actions"] {
-    display: none !important;
-  }
-}
-
-`;
-
-// client/mobile/locales.ts
-var NS = "mobileNav";
-var zh = {
-  "open": "\u6253\u5F00\u76EE\u5F55",
-  "close": "\u6536\u8D77\u76EE\u5F55",
-  "backdrop": "\u70B9\u51FB\u5173\u95ED\u76EE\u5F55",
-  "sessionLog": "\u5BFC\u51FA\u4F1A\u8BDD\u65E5\u5FD7",
-  "files": "\u6587\u4EF6\u6D4F\u89C8"
-};
-var en = {
-  "open": "Open directory",
-  "close": "Close directory",
-  "backdrop": "Click to close directory",
-  "sessionLog": "Session log",
-  "files": "Files"
-};
-
-// client/mobile/layout-mode.mjs
-function resolveLayout({ urlValue, stored, narrowMatch }) {
-  const url = String(urlValue ?? "").trim();
-  if (url === "desktop") return "desktop";
-  if (url === "mobile") return "mobile";
-  if (stored === "desktop" || stored === "mobile") return stored;
-  return narrowMatch ? "mobile" : "desktop";
-}
-function persistLayoutFromUrl(urlValue) {
-  if (typeof localStorage === "undefined") return "";
-  const v = String(urlValue ?? "").trim();
-  try {
-    if (v === "desktop" || v === "mobile") localStorage.setItem("dsh-pocket.layout", v);
-    else if (v === "auto" || v === "") localStorage.removeItem("dsh-pocket.layout");
-  } catch {
-  }
-  try {
-    const s = localStorage.getItem("dsh-pocket.layout");
-    return s === "desktop" || s === "mobile" ? s : "";
-  } catch {
-    return "";
-  }
-}
-
-// client/mobile/mobile-apply.tsx
-function mobileApply(ctx) {
-  const urlValue = new URL(window.location.href).searchParams.get("dsh-layout") ?? "";
-  const narrowMQ = window.matchMedia("(max-width: 1023px)");
-  const stored = persistLayoutFromUrl(urlValue);
-  const layout = resolveLayout({ urlValue, stored, narrowMatch: narrowMQ.matches });
-  document.body?.setAttribute("data-dsh-pocket-layout", layout);
-  if (layout === "desktop") return;
-  let narrow = narrowMQ;
-  if (layout === "mobile") {
-    narrow = { matches: true, addEventListener: () => {
-    }, removeEventListener: () => {
-    } };
-  }
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-mobile-nav: dictionaries");
-  ctx.effect(() => {
-    let active = true;
-    const applyEnabled = (enabled) => {
-      document.body?.setAttribute(MOBILE_RIGHTBAR_ATTRIBUTE, enabled ? "on" : "off");
-    };
-    const onChange = (event) => {
-      applyEnabled(event.detail?.enabled === true);
-    };
-    const load = async () => {
-      try {
-        const result = await ctx.connection.rpc.call(POCKET_RPC_CHANNEL, POCKET_ENDPOINTS.status, {});
-        if (active) applyEnabled(result?.ok === true ? result.value?.mobileRightbarEnabled !== false : true);
-      } catch {
-        if (active) applyEnabled(true);
-      }
-    };
-    window.addEventListener(MOBILE_RIGHTBAR_EVENT, onChange);
-    void load();
-    return () => {
-      active = false;
-      window.removeEventListener(MOBILE_RIGHTBAR_EVENT, onChange);
-      document.body?.removeAttribute(MOBILE_RIGHTBAR_ATTRIBUTE);
-    };
-  }, "dsh-mobile-nav: optional right sidebar");
-  ctx.effect(() => {
-    const tag = document.createElement("style");
-    tag.dataset.plugin = "@dsh-external/dsh-mobile-nav";
-    tag.dataset.pluginCss = "@dsh-external/dsh-mobile-nav/mobile.css";
-    tag.textContent = MOBILE_CSS;
-    document.head.appendChild(tag);
-    return () => {
-      tag.remove();
-    };
-  }, "dsh-mobile-nav: styles");
-  ctx.effect(() => {
-    const viewport = document.querySelector('meta[name="viewport"]');
-    const originalViewport = viewport?.content ?? "";
-    const themeMeta = document.createElement("meta");
-    themeMeta.name = "theme-color";
-    const bodyBg = () => getComputedStyle(document.body).backgroundColor;
-    const sync = () => {
-      if (viewport !== null) viewport.content = "width=device-width, initial-scale=1, viewport-fit=cover";
-      themeMeta.content = bodyBg();
-      if (themeMeta.parentElement === null) document.head.appendChild(themeMeta);
-    };
-    const restore = () => {
-      if (viewport !== null) viewport.content = originalViewport;
-      themeMeta.remove();
-    };
-    const onGestureStart = (event) => event.preventDefault();
-    if (narrow.matches) sync();
-    const onChange = (event) => event.matches ? sync() : restore();
-    narrow.addEventListener("change", onChange);
-    const observer = new MutationObserver(() => {
-      if (narrow.matches) themeMeta.content = bodyBg();
-    });
-    observer.observe(document.body, { attributes: true, attributeFilter: ["data-ds-dark-theme"] });
-    document.addEventListener("gesturestart", onGestureStart);
-    return () => {
-      narrow.removeEventListener("change", onChange);
-      observer.disconnect();
-      document.removeEventListener("gesturestart", onGestureStart);
-      restore();
-    };
-  }, "dsh-mobile-nav: status bar theme + viewport + zoom guard");
-  ctx.effect(() => {
-    if (!narrow.matches) return () => {
-    };
-    const onChevronClick = (event) => {
-      const target = event.target;
-      if (target === null || !target.closest(".aionui-collapse-chevron")) return;
-      document.querySelector('[data-mobile-nav="frame"]')?.removeAttribute("data-aionui-explorer-open");
-    };
-    document.addEventListener("click", onChevronClick, true);
-    return () => document.removeEventListener("click", onChevronClick, true);
-  }, "dsh-mobile-nav: aionui explorer close marker");
-  ctx.effect(() => {
-    if (!narrow.matches) return () => {
-    };
-    const frame = () => document.querySelector('[data-mobile-nav="frame"]');
-    const check = () => {
-      const has = document.querySelector("[data-aionui-explorer-col]") !== null;
-      frame()?.setAttribute("data-mobile-nav-explorer", has ? "1" : "0");
-    };
-    check();
-    const timer = window.setTimeout(check, 1500);
-    const observer = new MutationObserver(check);
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => {
-      window.clearTimeout(timer);
-      observer.disconnect();
-    };
-  }, "dsh-mobile-nav: explorer availability (issue #48)");
-  ctx.effect(() => {
-    if (!narrow.matches) return () => {
-    };
-    const frame = () => document.querySelector('[data-mobile-nav="frame"]');
-    const onTap = (event) => {
-      const target = event.target;
-      if (target === null) return;
-      if (target.closest('[data-aionui-explorer-col] [class$="_treeRow"]') === null) return;
-      frame()?.setAttribute("data-aionui-preview-open", "");
-    };
-    const sync = () => {
-      const pv = document.querySelector("[data-aionui-preview-col]");
-      if (pv === null) return;
-      if (getComputedStyle(pv).visibility === "hidden") frame()?.removeAttribute("data-aionui-preview-open");
-    };
-    document.addEventListener("click", onTap, true);
-    const observer = new MutationObserver(sync);
-    observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ["style"] });
-    sync();
-    return () => {
-      document.removeEventListener("click", onTap, true);
-      observer.disconnect();
-    };
-  }, "dsh-mobile-nav: preview sheet open marker");
-  ctx.effect(() => {
-    if (!narrow.matches) return () => {
-    };
-    const moveTps = (stats) => {
-      if ([...stats.children].some((c) => /^TPS\s+\d/.test((c.textContent ?? "").trim()))) return;
-      const stack = stats.closest('[class$="_composerStack"]');
-      if (stack === null) return;
-      for (const el of stack.querySelectorAll("div")) {
-        const text = (el.textContent ?? "").trim();
-        if (!/^TPS\s+\d/.test(text)) continue;
-        if (el.children.length > 0) continue;
-        stats.appendChild(el);
-        return;
-      }
-    };
-    const mark = () => {
-      const selector = '[data-phase] [data-slot="conversation.composer.dock"] [class$="_root"]';
-      for (const root of document.querySelectorAll(selector)) {
-        const text = root.textContent ?? "";
-        if (!/(turns|steps|\bLLM\b|轮|步)/.test(text)) continue;
-        root.setAttribute("data-mobile-nav", "stats");
-        moveTps(root);
-        return;
-      }
-    };
-    const observer = new MutationObserver(mark);
-    observer.observe(document.body, { childList: true, subtree: true });
-    mark();
-    return () => {
-      observer.disconnect();
-    };
-  }, "dsh-mobile-nav: stats line marker");
-  ctx.effect(() => {
-    if (!narrow.matches) return () => {
-    };
-    const cols = ["[data-aionui-explorer-col]", "[data-aionui-preview-col]"];
-    const seen = /* @__PURE__ */ new Map();
-    const play = (el) => {
-      el.animate(
-        [
-          { opacity: 0, transform: "translateY(28px)" },
-          { opacity: 1, transform: "none" }
-        ],
-        { duration: 280, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "backwards" }
-      );
-    };
-    const check = () => {
-      for (const sel of cols) {
-        const el = document.querySelector(sel);
-        if (el === null) continue;
-        const visible = getComputedStyle(el).visibility === "visible";
-        const prev = seen.get(sel) ?? false;
-        if (visible && !prev) play(el);
-        seen.set(sel, visible);
-      }
-    };
-    const observer = new MutationObserver(check);
-    observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ["style", "class", "data-aionui-explorer-open"] });
-    check();
-    return () => {
-      observer.disconnect();
-    };
-  }, "dsh-mobile-nav: sheet rise animation replay");
-  ctx.effect(() => {
-    if (!narrow.matches) return () => {
-    };
-    const getWorkspaceCwd = () => {
-      try {
-        const ws = ctx.get?.("workspaces") ?? ctx.workspaces;
-        const list = ws?.list;
-        const arr = Array.isArray(list) ? list : list && typeof list === "object" && "value" in list ? list.value : null;
-        if (Array.isArray(arr)) {
-          for (const w of arr) {
-            const c = w?.cwd ?? w?.root;
-            if (typeof c === "string" && c) return c;
-          }
-        }
-      } catch {
-      }
-      return "";
-    };
-    const readFile = (filePath) => ctx.connection.rpc.call(
-      POCKET_RPC_CHANNEL,
-      POCKET_ENDPOINTS.fileRead,
-      { path: filePath, cwd: getWorkspaceCwd() }
-    );
-    return startFileGuard(readFile);
-  }, "dsh-mobile-nav: file open guard + copy button + hide add-workspace (issue #17)");
-  ctx.effect(() => {
-    if (!narrow.matches) return () => {
-    };
-    const PHRASES = ["\u52A0\u8F7D\u63D0\u4F9B\u65B9\u76EE\u5F55\u5931\u8D25", "Settings are unavailable in this browser"];
-    const NOTICE = "\u624B\u673A\u4E0A\u4E0D\u652F\u6301\u6A21\u578B\u8BBE\u7F6E\uFF0C\u8BF7\u53BB\u7535\u8111\u7AEF\u4FEE\u6539\u8BBE\u7F6E";
-    const findDeepest = (el) => {
-      let deepest = el;
-      for (const child of el.querySelectorAll("*")) {
-        if (PHRASES.some((p) => (child.textContent ?? "").includes(p))) deepest = child;
-      }
-      return deepest;
-    };
-    const patch = () => {
-      for (const el of document.querySelectorAll("body *")) {
-        const t = el.textContent ?? "";
-        if (!PHRASES.some((p) => t.includes(p))) continue;
-        if (el.dataset?.dshpModelNotice === "1") continue;
-        const target = findDeepest(el);
-        target.textContent = NOTICE;
-        target.dataset.dshpModelNotice = "1";
-      }
-    };
-    const observer = new MutationObserver(patch);
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    patch();
-    return () => observer.disconnect();
-  }, "dsh-mobile-nav: replace model-settings load error with mobile hint");
-  ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
-    name: "conversation.session.header.actions",
-    id: "mobile-nav-toggle",
-    order: 10,
-    locale: NS,
-    inject: () => ({
-      toggleSidebar: () => ctx.layout.toggleSidebar()
-    })
-  }, MobileNavToggle));
-  ctx.slots.inject("shell.overlay", () => ctx.slots.register({
-    name: "shell.overlay",
-    id: "mobile-nav-overlay",
-    order: 10,
-    locale: NS,
-    inject: () => ({
-      toggleSidebar: () => ctx.layout.toggleSidebar()
-    })
-  }, MobileNavOverlay));
-  ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
-    name: "sidebar.footer.action",
-    id: "mobile-nav-session-log",
-    order: 10,
-    locale: NS,
-    inject: () => ({
-      downloadSessionLog: (sessionId) => ctx.sessionLogDownload.download(sessionId),
-      toggleSidebar: () => ctx.layout.toggleSidebar()
-    })
-  }, MobileDrawerFooter));
-}
-
 // client/pocket-locales.js
-var NS2 = "pocket";
-var zh2 = {
+var NS = "pocket";
+var zh = {
   "section": "\u624B\u673A\u8BBF\u95EE",
   "title": "\u{1F4F1} \u624B\u673A\u8BBF\u95EE",
   "subtitle": "\u624B\u673A\u626B\u7801\u6253\u5F00\u7684\u5C31\u662F\u7535\u8111\u4E0A\u7684\u8FD9\u4E2A\u754C\u9762\uFF0C\u5B9E\u65F6\u540C\u6B65",
@@ -2041,7 +298,7 @@ var zh2 = {
   "resetGo": "\u6062\u590D",
   "resetIntro": "\u8BBE\u7F6E\u641E\u51FA\u95EE\u9898\u65F6\u7684\u4E34\u65F6\u515C\u5E95\uFF1A\u6E05\u7A7A\u672C\u673A\u914D\u7F6E\u5E76\u91CD\u8BBE\u968F\u673A\u5BC6\u7801\uFF08DSH \u7684\u4F1A\u8BDD\u3001\u6A21\u578B\u3001\u63D2\u4EF6\u914D\u7F6E\u4E0D\u53D7\u5F71\u54CD\uFF09",
   "resetTitle": "\u26A0\uFE0F \u786E\u8BA4\u6062\u590D\u51FA\u5382\u8BBE\u7F6E\uFF1F",
-  "resetBody": "\u5C06\u6E05\u7A7A\u5E76\u6062\u590D\u9ED8\u8BA4\uFF1A\n\u2460 \u5F00\u5173\uFF1A\u5C40\u57DF\u7F51\u8BBF\u95EE=\u5F00\u3001\u8BBF\u95EE\u5BC6\u7801=\u5F00\u3001\u624B\u673A\u7AEF\u53F3\u8FB9\u680F=\u5F00\u3001\u5C40\u57DF\u7F51\u5730\u5740=\u81EA\u52A8\n\u2461 \u516C\u7F51\uFF1A\u6A21\u5F0F\u56DE\u5230\u968F\u673A\u57DF\u540D\uFF0C\u6E05\u7A7A Tunnel Token \u4E0E\u56FA\u5B9A\u57DF\u540D\uFF0C\u5E76\u5173\u95ED\u6B63\u5728\u8FD0\u884C\u7684\u516C\u7F51\n\u2462 \u5BC6\u7801\uFF1A\u516C\u7F51\u548C\u5C40\u57DF\u7F51\u90FD\u6362\u6210\u65B0\u7684\u968F\u673A 8 \u4F4D\u5BC6\u7801\uFF08\u65E7\u5BC6\u7801\u7ACB\u5373\u4F5C\u5E9F\uFF0C\u624B\u673A\u9700\u91CD\u65B0\u8F93\u5165\uFF09\n\nDSH \u81EA\u8EAB\u7684\u4F1A\u8BDD\u3001\u6A21\u578B\u3001\u63D2\u4EF6\u914D\u7F6E\u4E0D\u53D7\u5F71\u54CD\uFF1B\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002",
+  "resetBody": "\u5C06\u6E05\u7A7A\u5E76\u6062\u590D\u9ED8\u8BA4\uFF1A\n\u2460 \u5F00\u5173\uFF1A\u5C40\u57DF\u7F51\u8BBF\u95EE=\u5F00\u3001\u8BBF\u95EE\u5BC6\u7801=\u5F00\u3001\u5C40\u57DF\u7F51\u5730\u5740=\u81EA\u52A8\n\u2461 \u516C\u7F51\uFF1A\u6A21\u5F0F\u56DE\u5230\u968F\u673A\u57DF\u540D\uFF0C\u6E05\u7A7A Tunnel Token \u4E0E\u56FA\u5B9A\u57DF\u540D\uFF0C\u5E76\u5173\u95ED\u6B63\u5728\u8FD0\u884C\u7684\u516C\u7F51\n\u2462 \u5BC6\u7801\uFF1A\u516C\u7F51\u548C\u5C40\u57DF\u7F51\u90FD\u6362\u6210\u65B0\u7684\u968F\u673A 8 \u4F4D\u5BC6\u7801\uFF08\u65E7\u5BC6\u7801\u7ACB\u5373\u4F5C\u5E9F\uFF0C\u624B\u673A\u9700\u91CD\u65B0\u8F93\u5165\uFF09\n\nDSH \u81EA\u8EAB\u7684\u4F1A\u8BDD\u3001\u6A21\u578B\u3001\u63D2\u4EF6\u914D\u7F6E\u4E0D\u53D7\u5F71\u54CD\uFF1B\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002",
   "resetConfirm": "\u786E\u8BA4\u6062\u590D",
   "resetDone": "\u2705 \u5DF2\u6062\u590D\u51FA\u5382\u8BBE\u7F6E\uFF1A\u8BBE\u7F6E\u5DF2\u6E05\u7A7A\uFF0C\u5BC6\u7801\u5DF2\u6362\u65B0\uFF08\u624B\u673A\u9700\u91CD\u65B0\u8F93\u5165\uFF09",
   "resetFailed": "\u274C \u6062\u590D\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5",
@@ -2070,8 +327,6 @@ var zh2 = {
   "pinCustomHint": "\u81EA\u5B9A\u4E49\u540E\u5F00\u542F\u516C\u7F51\u4E0D\u518D\u81EA\u52A8\u6362\u65B0",
   "lanPinOff": "\u{1F513} \u5BC6\u7801\u5DF2\u5173\u95ED\uFF1A\u626B\u7801\u76F4\u8FDE\uFF0C\u65E0\u9700\u5BC6\u7801\uFF08\u4EC5\u540C\u4E00\u5C40\u57DF\u7F51\u8BBE\u5907\u53EF\u8BBF\u95EE\uFF1B\u516C\u7F51\u4ECD\u8981\u5BC6\u7801\uFF09",
   "lanStarting": "\u4EE3\u7406\u672A\u5C31\u7EEA\u2026",
-  "mobileRightbar": "\u624B\u673A\u7AEF\u53F3\u8FB9\u680F",
-  "mobileRightbarHint": "\u663E\u793A\u539F\u751F\u53F3\u8FB9\u680F\u5165\u53E3\uFF1B\u666E\u901A\u624B\u673A\u53EF\u6309\u9700\u5173\u95ED\uFF0C\u6298\u53E0\u5C4F\u5C55\u5F00\u540E\u4F7F\u7528\u66F4\u65B9\u4FBF",
   "wanTitle": "\u{1F310} \u516C\u7F51\uFF08\u4EBA\u5728\u5916\u9762\uFF09",
   "wanHint": "\u4EFB\u4F55\u7F51\u7EDC\u626B\u7801\u5373\u7528\uFF08URL \u6BCF\u6B21\u91CD\u542F\u81EA\u52A8\u6362\u65B0\uFF09",
   "wanPin": "\u{1F510} \u8BBF\u95EE\u5BC6\u7801\uFF1A{pin}\uFF08\u6BCF\u6B21\u5F00\u542F\u516C\u7F51\u53D8\u65B0\uFF1B\u624B\u673A\u6253\u5F00\u94FE\u63A5\u9700\u8F93\u5165\u6B64\u5BC6\u7801\uFF09",
@@ -2241,7 +496,7 @@ var zh2 = {
   "hostUnsupported": "\u5F53\u524D dsh-pocket \u7248\u672C\u672A\u8FD4\u56DE\u8FD9\u9879\u72B6\u6001\uFF0C\u5347\u7EA7\u5E76\u91CD\u542F\u540E\u53EF\u7528",
   "feedback": "\u6709\u95EE\u9898\uFF1F\u6B22\u8FCE\u5230 GitHub Issues \u53CD\u9988 \u{1F64F}"
 };
-var en2 = {
+var en = {
   "section": "Phone access",
   "title": "\u{1F4F1} Phone access",
   "subtitle": "The phone shows this exact screen, live",
@@ -2275,7 +530,7 @@ var en2 = {
   "resetGo": "Reset",
   "resetIntro": "Temporary fallback when settings break: clear local config and re-roll random PINs (DSH sessions, models and plugin config are untouched)",
   "resetTitle": "\u26A0\uFE0F Confirm factory reset?",
-  "resetBody": "This clears and restores defaults:\n\u2460 Switches: LAN access on, access PIN on, mobile right sidebar on, LAN address auto\n\u2461 Public: mode back to random URL, Tunnel Token and fixed domain cleared, and any running tunnel is stopped\n\u2462 PINs: both public and LAN become new random 8-character PINs (old ones stop working; the phone must re-enter)\n\nYour DSH sessions, models and plugin config are untouched. This cannot be undone.",
+  "resetBody": "This clears and restores defaults:\n\u2460 Switches: LAN access on, access PIN on, LAN address auto\n\u2461 Public: mode back to random URL, Tunnel Token and fixed domain cleared, and any running tunnel is stopped\n\u2462 PINs: both public and LAN become new random 8-character PINs (old ones stop working; the phone must re-enter)\n\nYour DSH sessions, models and plugin config are untouched. This cannot be undone.",
   "resetConfirm": "Reset",
   "resetDone": "\u2705 Factory reset done: settings cleared and PINs re-rolled (re-enter the PIN on your phone)",
   "resetFailed": "\u274C Reset failed \u2014 please retry",
@@ -2304,8 +559,6 @@ var en2 = {
   "pinCustomHint": "custom PINs are not rotated on tunnel start",
   "lanPinOff": "\u{1F513} PIN off \u2014 scan & go, no PIN (LAN devices only; public still requires PIN)",
   "lanStarting": "Proxy starting\u2026",
-  "mobileRightbar": "Mobile right sidebar",
-  "mobileRightbarHint": "Show the native right-sidebar entry; disable it for a compact phone header or keep it on for an unfolded display",
   "wanTitle": "\u{1F310} Anywhere (public)",
   "wanHint": "Scan from any network (the URL changes on every restart)",
   "wanPin": "\u{1F510} PIN: {pin} (changes each time the tunnel is enabled; required on the phone)",
@@ -2571,21 +824,16 @@ function detectWebAuthn() {
     return { supported: false, secure: false };
   }
 }
-function applyMobileRightbarSetting(enabled) {
-  const on = enabled !== false;
-  document.body?.setAttribute(MOBILE_RIGHTBAR_ATTRIBUTE, on ? "on" : "off");
-  window.dispatchEvent(new CustomEvent(MOBILE_RIGHTBAR_EVENT, { detail: { enabled: on } }));
-}
 function PocketSettingsTab({ rpcCall, t }) {
-  const [status, setStatus] = (0, import_react2.useState)(null);
-  const [busy, setBusy] = (0, import_react2.useState)(false);
-  const [error, setError] = (0, import_react2.useState)(null);
-  const [tunnelState, setTunnelState] = (0, import_react2.useState)(null);
-  const [restartNotice, setRestartNotice] = (0, import_react2.useState)(false);
-  const [updateInfo, setUpdateInfo] = (0, import_react2.useState)(null);
-  const [isDesktop, setIsDesktop] = (0, import_react2.useState)(false);
-  const [now, setNow] = (0, import_react2.useState)(Date.now());
-  (0, import_react2.useEffect)(() => {
+  const [status, setStatus] = (0, import_react.useState)(null);
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const [error, setError] = (0, import_react.useState)(null);
+  const [tunnelState, setTunnelState] = (0, import_react.useState)(null);
+  const [restartNotice, setRestartNotice] = (0, import_react.useState)(false);
+  const [updateInfo, setUpdateInfo] = (0, import_react.useState)(null);
+  const [isDesktop, setIsDesktop] = (0, import_react.useState)(false);
+  const [now, setNow] = (0, import_react.useState)(Date.now());
+  (0, import_react.useEffect)(() => {
     const t2 = setInterval(() => setNow(Date.now()), 1e3);
     return () => clearInterval(t2);
   }, []);
@@ -2599,7 +847,6 @@ function PocketSettingsTab({ rpcCall, t }) {
     try {
       const s = await call(POCKET_ENDPOINTS.status, {});
       setStatus(s);
-      applyMobileRightbarSetting(s.mobileRightbarEnabled);
       setTunnelState(s.tunnelState ?? null);
       refreshBrowserCapabilities();
       if (s.desktop) setIsDesktop(true);
@@ -2619,18 +866,18 @@ function PocketSettingsTab({ rpcCall, t }) {
     } catch {
     }
   };
-  (0, import_react2.useEffect)(() => {
+  (0, import_react.useEffect)(() => {
     load();
     const t2 = setInterval(load, 3e3);
     return () => clearInterval(t2);
   }, []);
-  (0, import_react2.useEffect)(() => {
+  (0, import_react.useEffect)(() => {
     try {
       sessionStorage.removeItem("dshp-auto-reloaded");
     } catch {
     }
   }, []);
-  (0, import_react2.useEffect)(() => {
+  (0, import_react.useEffect)(() => {
     if (isDesktop) return;
     let alive = true;
     const check = async () => {
@@ -2686,8 +933,8 @@ function PocketSettingsTab({ rpcCall, t }) {
       setUpdateInfo((u) => ({ ...u, updating: false, result: "fail", output: err.message }));
     }
   };
-  const [disclaimerOpen, setDisclaimerOpen] = (0, import_react2.useState)(false);
-  const [disclaimerChecked, setDisclaimerChecked] = (0, import_react2.useState)(false);
+  const [disclaimerOpen, setDisclaimerOpen] = (0, import_react.useState)(false);
+  const [disclaimerChecked, setDisclaimerChecked] = (0, import_react.useState)(false);
   const doStartTunnel = async () => {
     const target = pendingMode ?? publicMode;
     if (target === "ssh") {
@@ -2734,8 +981,8 @@ function PocketSettingsTab({ rpcCall, t }) {
     } catch {
     }
   };
-  const [tunnelCfg, setTunnelCfg] = (0, import_react2.useState)(null);
-  const [pendingMode, setPendingMode] = (0, import_react2.useState)(null);
+  const [tunnelCfg, setTunnelCfg] = (0, import_react.useState)(null);
+  const [pendingMode, setPendingMode] = (0, import_react.useState)(null);
   const switchToQuick = async () => {
     try {
       setStatus(await call(POCKET_ENDPOINTS.tunnelSetConfig, { mode: "quick" }));
@@ -2759,7 +1006,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       return false;
     }
   };
-  const [resetOpen, setResetOpen] = (0, import_react2.useState)(false);
+  const [resetOpen, setResetOpen] = (0, import_react.useState)(false);
   const doFactoryReset = async () => {
     setResetOpen(false);
     setBusy(true);
@@ -2767,7 +1014,6 @@ function PocketSettingsTab({ rpcCall, t }) {
     try {
       const next = await call(POCKET_ENDPOINTS.pocketReset, { confirm: true });
       setStatus(next);
-      applyMobileRightbarSetting(next.mobileRightbarEnabled);
       setTunnelCfg(null);
       setCustomPin(null);
       setAdvOpen(false);
@@ -2793,17 +1039,7 @@ function PocketSettingsTab({ rpcCall, t }) {
     } catch {
     }
   };
-  const setMobileRightbar = async (on) => {
-    try {
-      const r = await call(POCKET_ENDPOINTS.mobileRightbarSetEnabled, { on });
-      const enabled = r.mobileRightbarEnabled === true;
-      setStatus((s) => ({ ...s, mobileRightbarEnabled: enabled }));
-      applyMobileRightbarSetting(enabled);
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-  const [lanToggleOpen, setLanToggleOpen] = (0, import_react2.useState)(null);
+  const [lanToggleOpen, setLanToggleOpen] = (0, import_react.useState)(null);
   const requestLanToggle = (on) => setLanToggleOpen(on);
   const confirmLanToggle = async () => {
     const on = lanToggleOpen;
@@ -2823,7 +1059,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       setError(err.message);
     }
   };
-  const [customPin, setCustomPin] = (0, import_react2.useState)(null);
+  const [customPin, setCustomPin] = (0, import_react.useState)(null);
   const saveCustomPin = async (which) => {
     try {
       const r = await call(POCKET_ENDPOINTS.pinSetCustom, { which, value: customPin?.value ?? "" });
@@ -2839,11 +1075,11 @@ function PocketSettingsTab({ rpcCall, t }) {
       setCustomPin((c) => ({ ...c, err: err.message }));
     }
   };
-  const customPinRow = (which) => (0, import_react2.createElement)(
+  const customPinRow = (which) => (0, import_react.createElement)(
     "div",
     { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.5 } },
     t("customizing"),
-    (0, import_react2.createElement)("input", {
+    (0, import_react.createElement)("input", {
       style: { width: 130, margin: "0 6px", padding: "4px 8px", fontSize: 14, letterSpacing: 1, textAlign: "center", border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none" },
       type: "password",
       minLength: 8,
@@ -2856,11 +1092,11 @@ function PocketSettingsTab({ rpcCall, t }) {
         if (e.key === "Escape") setCustomPin(null);
       }
     }),
-    (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 2 }, onClick: () => saveCustomPin(which) }, t("save")),
-    (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => setCustomPin(null) }, t("cancel")),
-    customPin?.err ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(customPin.err)) : null
+    (0, import_react.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 2 }, onClick: () => saveCustomPin(which) }, t("save")),
+    (0, import_react.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => setCustomPin(null) }, t("cancel")),
+    customPin?.err ? (0, import_react.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(customPin.err)) : null
   );
-  const customBtn = (which) => (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setCustomPin({ which, value: "", err: null }) }, t("customize"));
+  const customBtn = (which) => (0, import_react.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setCustomPin({ which, value: "", err: null }) }, t("customize"));
   const lanUrl = status?.lanUrl;
   const tunnelUrl = status?.tunnelUrl;
   const tunnelPhase = tunnelState?.phase ?? "idle";
@@ -2871,19 +1107,19 @@ function PocketSettingsTab({ rpcCall, t }) {
   const namedMode = tunnelModeView.mode === "named";
   const namedActive = namedMode || tunnelCfg !== null;
   const errText = (msg) => {
-    const s = String(msg ?? "");
+    const s = msg == null ? "" : pocketErrorText(msg);
     const i = s.indexOf(" | ");
     if (i < 0) return s;
-    return (t("ok") === zh2.ok ? s.slice(0, i) : s.slice(i + 3)).trim();
+    return (t("ok") === zh.ok ? s.slice(0, i) : s.slice(i + 3)).trim();
   };
-  const [toast, setToast] = (0, import_react2.useState)(null);
-  const toastTimer = (0, import_react2.useRef)(null);
+  const [toast, setToast] = (0, import_react.useState)(null);
+  const toastTimer = (0, import_react.useRef)(null);
   const showToast = (text) => {
     setToast(text);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2600);
   };
-  (0, import_react2.useEffect)(() => () => clearTimeout(toastTimer.current), []);
+  (0, import_react.useEffect)(() => () => clearTimeout(toastTimer.current), []);
   const modeBtnStyle = (active) => ({
     ...styles.btn,
     height: 28,
@@ -2893,34 +1129,34 @@ function PocketSettingsTab({ rpcCall, t }) {
     background: active ? "var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))" : "var(--dsw-alias-bg-layer-1,#fff)",
     color: active ? "var(--dsw-alias-label-primary-foreground, #fff)" : "var(--dsw-alias-label-primary,inherit)"
   });
-  const Switch = (on, onClick) => (0, import_react2.createElement)("button", {
+  const Switch = (on, onClick) => (0, import_react.createElement)("button", {
     role: "switch",
     "aria-checked": !!on,
     style: { flexShrink: 0, width: 40, height: 22, borderRadius: 11, border: "none", padding: 0, position: "relative", cursor: "pointer", font: "inherit", background: on ? "var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))" : "var(--dsw-alias-border-l2,#d1d5db)" },
     onClick
-  }, (0, import_react2.createElement)("span", { style: { position: "absolute", top: 2, left: on ? 20 : 2, width: 18, height: 18, borderRadius: "50%", background: "#fff" } }));
-  const qrArea = (src, url, hint) => (0, import_react2.createElement)(
+  }, (0, import_react.createElement)("span", { style: { position: "absolute", top: 2, left: on ? 20 : 2, width: 18, height: 18, borderRadius: "50%", background: "#fff" } }));
+  const qrArea = (src, url, hint) => (0, import_react.createElement)(
     "div",
     { style: { background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", borderRadius: 10, padding: "10px 12px", textAlign: "center", margin: "10px 0" } },
-    (0, import_react2.createElement)("img", { src, alt: "QR", style: styles.qr }),
-    (0, import_react2.createElement)("div", { style: styles.code }, url),
-    (0, import_react2.createElement)("div", { style: styles.muted }, hint)
+    (0, import_react.createElement)("img", { src, alt: "QR", style: styles.qr }),
+    (0, import_react.createElement)("div", { style: styles.code }, url),
+    (0, import_react.createElement)("div", { style: styles.muted }, hint)
   );
-  const row = (label, control, extra) => (0, import_react2.createElement)(
+  const row = (label, control, extra) => (0, import_react.createElement)(
     "div",
     { style: { borderTop: "1px solid var(--dsw-alias-border-l2,#e5e7eb)", paddingTop: 9, marginTop: 9 } },
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
-      (0, import_react2.createElement)("span", { style: { fontSize: 13 } }, label),
+      (0, import_react.createElement)("span", { style: { fontSize: 13 } }, label),
       control
     ),
     extra ?? null
   );
-  const [advOpen, setAdvOpen] = (0, import_react2.useState)(false);
-  const [sshCfg, setSshCfg] = (0, import_react2.useState)(null);
-  const [sshTestResult, setSshTestResult] = (0, import_react2.useState)(null);
-  const [sshTesting, setSshTesting] = (0, import_react2.useState)(false);
+  const [advOpen, setAdvOpen] = (0, import_react.useState)(false);
+  const [sshCfg, setSshCfg] = (0, import_react.useState)(null);
+  const [sshTestResult, setSshTestResult] = (0, import_react.useState)(null);
+  const [sshTesting, setSshTesting] = (0, import_react.useState)(false);
   const publicMode = tunnelModeView?.mode === "ssh" ? "ssh" : tunnelModeView?.mode === "named" ? "named" : "quick";
   const willStartMode = pendingMode ?? publicMode;
   const channelLabel = (m) => t(m === "ssh" ? "channelSsh" : m === "named" ? "channelNamed" : "channelQuick");
@@ -3039,14 +1275,14 @@ function PocketSettingsTab({ rpcCall, t }) {
     if (open) openSshEditor();
     setPendingMode(open && sshView !== null ? "ssh" : null);
   };
-  const sshField = (label, node, hint) => (0, import_react2.createElement)(
+  const sshField = (label, node, hint) => (0, import_react.createElement)(
     "div",
     { style: { marginTop: 9, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.5 } },
-    (0, import_react2.createElement)("div", { style: { marginBottom: 3 } }, label),
+    (0, import_react.createElement)("div", { style: { marginBottom: 3 } }, label),
     node,
-    hint ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 2 } }, hint) : null
+    hint ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 2 } }, hint) : null
   );
-  const sshInput = (value, onChange, extra) => (0, import_react2.createElement)("input", {
+  const sshInput = (value, onChange, extra) => (0, import_react.createElement)("input", {
     style: styles.input,
     value: value ?? "",
     autoComplete: "off",
@@ -3055,37 +1291,37 @@ function PocketSettingsTab({ rpcCall, t }) {
   });
   const COLOR_OK = "var(--dsw-alias-state-success-primary,#15803d)";
   const COLOR_ERR = "var(--dsw-alias-state-error-primary,#dc2626)";
-  const sshSection = !sshActive ? null : (0, import_react2.createElement)(
+  const sshSection = !sshActive ? null : (0, import_react.createElement)(
     "div",
     { style: { marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--dsw-alias-border-l2,#e5e7eb)" } },
-    (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("sshTitle")),
-    (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("sshHint")),
+    (0, import_react.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("sshTitle")),
+    (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("sshHint")),
     // 运行状态与阶段
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word", color: sshState === "connected" ? COLOR_OK : sshState === "failed" ? COLOR_ERR : "var(--dsw-alias-label-secondary,#6b7280)" } },
       t(sshStateKey)
     ),
-    sshView?.lastError ? (0, import_react2.createElement)("div", { style: { ...styles.warn, marginTop: 4, wordBreak: "break-word" } }, fmt(t, "sshLastError", { err: errText(sshView.lastError) })) : null,
-    sshTestResult ? (0, import_react2.createElement)(
+    sshView?.lastError ? (0, import_react.createElement)("div", { style: { ...styles.warn, marginTop: 4, wordBreak: "break-word" } }, fmt(t, "sshLastError", { err: errText(sshView.lastError) })) : null,
+    sshTestResult ? (0, import_react.createElement)(
       "div",
       { style: { marginTop: 4, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word", color: sshTestResult.ok ? COLOR_OK : COLOR_ERR } },
       sshTestResult.ok ? t("sshTestOk") : sshTestResult.unavailable ? t("sshTestUnavailable") : sshTestResult.state ? t(SSH_STATE_TEXT[sshTestResult.state] ?? SSH_STATE_TEXT.idle) : fmt(t, "sshTestFail", { err: errText(sshTestResult.message) || t("unknownError") })
     ) : null,
     // 地址与二维码：运行且有二维码时优先展示，否则只显示地址 + 复制
-    sshRunning && sshAddress && sshView?.qr ? qrArea(sshView.qr, sshAddress, t("sshRunningHint")) : sshAddress ? (0, import_react2.createElement)(
+    sshRunning && sshAddress && sshView?.qr ? qrArea(sshView.qr, sshAddress, t("sshRunningHint")) : sshAddress ? (0, import_react.createElement)(
       "div",
       { style: { marginTop: 8 } },
-      (0, import_react2.createElement)("div", { style: styles.code }, sshAddress),
-      (0, import_react2.createElement)("div", null, (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => copyText2(sshAddress) }, t("copy"))),
-      (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("sshUrlHint"))
+      (0, import_react.createElement)("div", { style: styles.code }, sshAddress),
+      (0, import_react.createElement)("div", null, (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: () => copyText(sshAddress) }, t("copy"))),
+      (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("sshUrlHint"))
     ) : null,
     // 配置表单
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       null,
-      !sshView ? (0, import_react2.createElement)("div", { style: { ...styles.warn, marginTop: 8 } }, t("hostUnsupported")) : null,
-      sshView || sshEdit ? (0, import_react2.createElement)(
+      !sshView ? (0, import_react.createElement)("div", { style: { ...styles.warn, marginTop: 8 } }, t("hostUnsupported")) : null,
+      sshView || sshEdit ? (0, import_react.createElement)(
         "div",
         null,
         sshField(t("sshHost"), sshInput(sshForm.host, (v) => patchSshForm({ host: v.trim() }), { placeholder: "vps.example.com" })),
@@ -3103,11 +1339,11 @@ function PocketSettingsTab({ rpcCall, t }) {
         ),
         sshField(
           t("sshAccessProtocol"),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "select",
             { style: styles.select, value: sshForm.accessProtocol, onChange: (e) => patchSshForm({ accessProtocol: e.target.value }) },
-            (0, import_react2.createElement)("option", { value: "https" }, "https"),
-            (0, import_react2.createElement)("option", { value: "http" }, "http")
+            (0, import_react.createElement)("option", { value: "https" }, "https"),
+            (0, import_react.createElement)("option", { value: "http" }, "http")
           )
         ),
         sshField(
@@ -3122,29 +1358,29 @@ function PocketSettingsTab({ rpcCall, t }) {
           t("sshAutoRestoreHint")
         )
       ) : null,
-      sshForm.err ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR, marginTop: 6, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word" } }, errText(sshForm.err)) : null,
+      sshForm.err ? (0, import_react.createElement)("div", { style: { color: COLOR_ERR, marginTop: 6, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word" } }, errText(sshForm.err)) : null,
       // 操作：保存 / 测试连接。启动与停止统一走上方唯一的「开启公网访问（…）」按钮 ——
       // 同一动作不再出现两个文案不同、职责不清的入口（用户实测反馈）。
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" } },
-        (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: saveSshConfig }, t("save")),
-        (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: testSshConnection, disabled: sshTesting }, sshTesting ? t("sshTesting") : t("sshTest")),
-        sshEdit ? (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: () => {
+        (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: saveSshConfig }, t("save")),
+        (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: testSshConnection, disabled: sshTesting }, sshTesting ? t("sshTesting") : t("sshTest")),
+        sshEdit ? (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: () => {
           setSshCfg(null);
           if (!sshMode) setPendingMode(null);
         } }, t("cancel")) : null
       ),
-      (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("sshStartHint"))
+      (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("sshStartHint"))
     )
   );
-  const [notifyEdit, setNotifyEdit] = (0, import_react2.useState)(null);
-  const [notifyStatusData, setNotifyStatusData] = (0, import_react2.useState)(null);
-  const [notifyBusy, setNotifyBusy] = (0, import_react2.useState)(false);
-  const [pushApiReady, setPushApiReady] = (0, import_react2.useState)(false);
-  const [canInstall, setCanInstall] = (0, import_react2.useState)(false);
-  const [clearSubsAsk, setClearSubsAsk] = (0, import_react2.useState)(false);
-  const installEvRef = (0, import_react2.useRef)(null);
+  const [notifyEdit, setNotifyEdit] = (0, import_react.useState)(null);
+  const [notifyStatusData, setNotifyStatusData] = (0, import_react.useState)(null);
+  const [notifyBusy, setNotifyBusy] = (0, import_react.useState)(false);
+  const [pushApiReady, setPushApiReady] = (0, import_react.useState)(false);
+  const [canInstall, setCanInstall] = (0, import_react.useState)(false);
+  const [clearSubsAsk, setClearSubsAsk] = (0, import_react.useState)(false);
+  const installEvRef = (0, import_react.useRef)(null);
   const notifyView = status?.notify ?? null;
   const notifyForm = notifyEdit ?? {
     preset: notifyView?.webhookPreset ?? "generic",
@@ -3222,13 +1458,13 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(failed ? fmt(t, "notifyTestFailed", { err: errText(failed.error) || `${resultChannel(failed)} HTTP ${failed.status ?? "\u2014"}` }) : t("notifyTestSent"));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, "notifyTestFailed", { err: errText(err?.message) || t("unknownError") }));
+      showToast(fmt(t, "notifyTestFailed", { err: errText(err) || t("unknownError") }));
     } finally {
       setNotifyBusy(false);
     }
   };
-  const [diagnoseBusy, setDiagnoseBusy] = (0, import_react2.useState)(false);
-  const [diagnoseData, setDiagnoseData] = (0, import_react2.useState)(null);
+  const [diagnoseBusy, setDiagnoseBusy] = (0, import_react.useState)(false);
+  const [diagnoseData, setDiagnoseData] = (0, import_react.useState)(null);
   const runDiagnose = async () => {
     setDiagnoseBusy(true);
     try {
@@ -3243,7 +1479,7 @@ function PocketSettingsTab({ rpcCall, t }) {
     try {
       return render();
     } catch (err) {
-      return (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, wordBreak: "break-word" } }, `\u6E32\u67D3\u5931\u8D25\uFF1A${err?.message ?? err}`);
+      return (0, import_react.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, wordBreak: "break-word" } }, `\u6E32\u67D3\u5931\u8D25\uFF1A${err?.message ?? err}`);
     }
   };
   const resultChannel = (r) => r?.channel === "webhook" ? t("notifyResultWebhook") : t("notifyResultPush");
@@ -3286,7 +1522,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(t("notifySubscribed"));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, "notifySubscribeFailed", { err: errText(err?.message) || t("unknownError") }));
+      showToast(fmt(t, "notifySubscribeFailed", { err: errText(err) || t("unknownError") }));
     } finally {
       setNotifyBusy(false);
     }
@@ -3304,7 +1540,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(t("notifyUnsubscribed"));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, "notifyUnsubscribeFailed", { err: errText(err?.message) || t("unknownError") }));
+      showToast(fmt(t, "notifyUnsubscribeFailed", { err: errText(err) || t("unknownError") }));
     } finally {
       setNotifyBusy(false);
     }
@@ -3317,7 +1553,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(t("notifyCleared"));
       loadNotifyStatus();
     } catch (err) {
-      showToast(fmt(t, "notifyClearFailed", { err: errText(err?.message) || t("unknownError") }));
+      showToast(fmt(t, "notifyClearFailed", { err: errText(err) || t("unknownError") }));
     } finally {
       setNotifyBusy(false);
     }
@@ -3340,7 +1576,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       }
       showToast(t("pwaInstallTriggered"));
     } catch (err) {
-      showToast(fmt(t, "notifySubscribeFailed", { err: errText(err?.message) || t("unknownError") }));
+      showToast(fmt(t, "notifySubscribeFailed", { err: errText(err) || t("unknownError") }));
     }
   };
   const pwaReason = () => {
@@ -3354,14 +1590,14 @@ function PocketSettingsTab({ rpcCall, t }) {
       return t("pwaNotReady");
     }
   };
-  const [devices, setDevices] = (0, import_react2.useState)(null);
-  const [devicesErr, setDevicesErr] = (0, import_react2.useState)(null);
-  const [renameId, setRenameId] = (0, import_react2.useState)(null);
-  const [renameVal, setRenameVal] = (0, import_react2.useState)("");
-  const [revokeId, setRevokeId] = (0, import_react2.useState)(null);
-  const [passkeyBusy, setPasskeyBusy] = (0, import_react2.useState)(false);
-  const [regBusy, setRegBusy] = (0, import_react2.useState)(false);
-  const [regMsg, setRegMsg] = (0, import_react2.useState)(null);
+  const [devices, setDevices] = (0, import_react.useState)(null);
+  const [devicesErr, setDevicesErr] = (0, import_react.useState)(null);
+  const [renameId, setRenameId] = (0, import_react.useState)(null);
+  const [renameVal, setRenameVal] = (0, import_react.useState)("");
+  const [revokeId, setRevokeId] = (0, import_react.useState)(null);
+  const [passkeyBusy, setPasskeyBusy] = (0, import_react.useState)(false);
+  const [regBusy, setRegBusy] = (0, import_react.useState)(false);
+  const [regMsg, setRegMsg] = (0, import_react.useState)(null);
   const passkeyView = status?.passkey ?? null;
   const webAuthn = detectWebAuthn();
   const registerThisDevice = async () => {
@@ -3381,7 +1617,7 @@ function PocketSettingsTab({ rpcCall, t }) {
         setRegMsg({ ok: false, text: errText(r?.error?.message ?? r?.error) || t("unknownError") });
       }
     } catch (err) {
-      setRegMsg({ ok: false, text: errText(err?.message) || t("unknownError") });
+      setRegMsg({ ok: false, text: errText(err) || t("unknownError") });
     } finally {
       setRegBusy(false);
     }
@@ -3435,7 +1671,7 @@ function PocketSettingsTab({ rpcCall, t }) {
       setError(err.message);
     }
   };
-  const copyText2 = async (text) => {
+  const copyText = async (text) => {
     const value = String(text ?? "").trim();
     if (!value) return;
     try {
@@ -3462,31 +1698,31 @@ function PocketSettingsTab({ rpcCall, t }) {
       showToast(t("copyFailed"));
     }
   };
-  const initialLoadRef = (0, import_react2.useRef)(false);
-  (0, import_react2.useEffect)(() => {
+  const initialLoadRef = (0, import_react.useRef)(false);
+  (0, import_react.useEffect)(() => {
     if (!status || initialLoadRef.current) return;
     initialLoadRef.current = true;
     if (status.passkey) loadDevices();
     if (status.notify) loadNotifyStatus();
   }, [status]);
-  return (0, import_react2.createElement)(
+  return (0, import_react.createElement)(
     "div",
     { style: styles.card },
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         null,
-        (0, import_react2.createElement)("strong", null, t("title")),
-        (0, import_react2.createElement)("div", { style: styles.muted }, t("subtitle"))
+        (0, import_react.createElement)("strong", null, t("title")),
+        (0, import_react.createElement)("div", { style: styles.muted }, t("subtitle"))
       ),
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary,#8b93a1)", textAlign: "right" } },
-        (0, import_react2.createElement)("div", { style: { whiteSpace: "nowrap" } }, t("developer")),
-        (0, import_react2.createElement)("div", { style: { whiteSpace: "nowrap" } }, t("starAsk")),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)("div", { style: { whiteSpace: "nowrap" } }, t("developer")),
+        (0, import_react.createElement)("div", { style: { whiteSpace: "nowrap" } }, t("starAsk")),
+        (0, import_react.createElement)(
           "a",
           { href: "https://github.com/shaobeichen/dsh-pocket", target: "_blank", rel: "noreferrer", style: { color: "var(--dsw-alias-brand-primary,#4f6ef7)", fontSize: 12, lineHeight: 1.6, textDecoration: "underline" } },
           t("starCta")
@@ -3495,49 +1731,49 @@ function PocketSettingsTab({ rpcCall, t }) {
     ),
     // 桌面端不显示更新/重启横幅（更新由 DSH Desktop 管理），也不需要额外提示
     // 重启后提示（进程在后台运行，停止方法）——左侧蓝色色条（桌面端不会触发本插件的自重启）
-    !isDesktop && restartNotice ? (0, import_react2.createElement)(
+    !isDesktop && restartNotice ? (0, import_react.createElement)(
       "div",
       { style: { ...styles.block, borderLeft: "4px solid var(--dsw-alias-brand-primary,#4f6ef7)", borderRadius: 8, background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", padding: "10px 12px" } },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
-        (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 13 } }, t("restarted")),
-        (0, import_react2.createElement)("button", { style: styles.btn, onClick: () => setRestartNotice(false) }, t("ok"))
+        (0, import_react.createElement)("div", { style: { fontWeight: 600, fontSize: 13 } }, t("restarted")),
+        (0, import_react.createElement)("button", { style: styles.btn, onClick: () => setRestartNotice(false) }, t("ok"))
       ),
-      (0, import_react2.createElement)("div", { style: styles.muted, marginTop: 4, wordBreak: "break-all" }, fmt(t, "bgHint", { cmd: status?.killHint ?? `lsof -ti :${status?.dshPort ?? 3080} | xargs kill -9` }))
+      (0, import_react.createElement)("div", { style: styles.muted, marginTop: 4, wordBreak: "break-all" }, fmt(t, "bgHint", { cmd: status?.killHint ?? `lsof -ti :${status?.dshPort ?? 3080} | xargs kill -9` }))
     ) : null,
     // 更新提示——左侧黄色色条（提示有新版本）；单状态：有更新/更新中/已更新自动重启，不并存
     // 桌面端不渲染（更新由 DSH Desktop 管理）
-    !isDesktop && updateInfo ? (0, import_react2.createElement)(
+    !isDesktop && updateInfo ? (0, import_react.createElement)(
       "div",
       { style: { ...styles.block, borderLeft: "4px solid var(--dsw-alias-state-warn-primary,#b45309)", borderRadius: 8, background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", padding: "10px 12px" } },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)(
           "div",
           { style: { fontWeight: 600, fontSize: 13 } },
           updateInfo.updated ? fmt(t, "updatedRestart", { ver: updateInfo.current }) : updateInfo.result === "ok" ? updateInfo.autoRestart ? fmt(t, "updateAutoRestarting", { ver: updateInfo.latest }) : fmt(t, "updatedOk", { ver: updateInfo.latest }) : fmt(t, "updateAvailable", { ver: updateInfo.latest })
         ),
-        updateInfo.result !== "ok" ? (0, import_react2.createElement)("button", { style: styles.primary, onClick: runUpdate, disabled: updateInfo.updating }, updateInfo.updating ? t("updating") : fmt(t, "updateTo", { ver: updateInfo.latest })) : updateInfo.autoRestart ? (0, import_react2.createElement)("button", { style: styles.btn, disabled: true }, t("restartingNow")) : (0, import_react2.createElement)("button", { style: styles.primary, onClick: restartPocket, disabled: updateInfo.restarting }, updateInfo.restarting ? t("restarting") : t("restartNow"))
+        updateInfo.result !== "ok" ? (0, import_react.createElement)("button", { style: styles.primary, onClick: runUpdate, disabled: updateInfo.updating }, updateInfo.updating ? t("updating") : fmt(t, "updateTo", { ver: updateInfo.latest })) : updateInfo.autoRestart ? (0, import_react.createElement)("button", { style: styles.btn, disabled: true }, t("restartingNow")) : (0, import_react.createElement)("button", { style: styles.primary, onClick: restartPocket, disabled: updateInfo.restarting }, updateInfo.restarting ? t("restarting") : t("restartNow"))
       ),
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: styles.muted, marginTop: 4 },
         updateInfo.updating ? fmt(t, "updatingDetail", { s: elapsed(updateInfo.startedAt) }) : updateInfo.restarting ? fmt(t, "restartingDetail", { s: elapsed(updateInfo.startedAt) }) : updateInfo.result === "ok" ? updateInfo.autoRestart ? t("updatedAutoDetail") : t("updatedRestartDetail") : updateInfo.result === "fail" ? fmt(t, "updateFailed", { err: errText(updateInfo.output) || t("unknownError") }) : fmt(t, "versionRange", { cur: updateInfo.current, latest: updateInfo.latest })
       )
     ) : null,
     // 局域网：标题行自带总开关 → 二维码+地址 → 设置行（访问密码 / 高级·手动选地址）
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: styles.block },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
-        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("lanAccess")),
+        (0, import_react.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("lanAccess")),
         Switch(status?.lanEnabled !== false, () => requestLanToggle(status?.lanEnabled === false))
       ),
-      status?.lanEnabled === false ? (0, import_react2.createElement)("div", { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("lanDisabledHint")) : lanUrl ? (0, import_react2.createElement)(
+      status?.lanEnabled === false ? (0, import_react.createElement)("div", { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("lanDisabledHint")) : lanUrl ? (0, import_react.createElement)(
         "div",
         null,
         qrArea(status.lanQr, lanUrl, t("lanHint")),
@@ -3545,99 +1781,99 @@ function PocketSettingsTab({ rpcCall, t }) {
         row(
           t("lanPin"),
           Switch(status?.lanAuthEnabled !== false, () => setLanAuth(status?.lanAuthEnabled === false)),
-          status?.lanAuthEnabled === false ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanPinOff")) : customPin?.which === "lan" ? customPinRow("lan") : (0, import_react2.createElement)(
+          status?.lanAuthEnabled === false ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanPinOff")) : customPin?.which === "lan" ? customPinRow("lan") : (0, import_react.createElement)(
             "div",
             { style: { marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
-            (0, import_react2.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.lanToken),
-            (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: refreshLanPin }, t("refresh")),
+            (0, import_react.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.lanToken),
+            (0, import_react.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: refreshLanPin }, t("refresh")),
             customBtn("lan"),
-            status?.lanPinCustom ? (0, import_react2.createElement)("span", { style: { fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)" } }, t("pinCustomHint")) : null
+            status?.lanPinCustom ? (0, import_react.createElement)("span", { style: { fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)" } }, t("pinCustomHint")) : null
           )
         ),
         // 高级：手动选地址（默认收起）
         row(
           t("advAddress"),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "button",
             { style: { border: "none", background: "none", font: "inherit", cursor: "pointer", fontSize: 12, color: "var(--dsw-alias-label-tertiary,#8b93a1)", padding: 0 }, onClick: () => setAdvOpen((v) => !v) },
             (status?.lanIpOverride || t("lanAddressAuto")) + " \u203A"
           ),
-          advOpen ? (0, import_react2.createElement)(
+          advOpen ? (0, import_react.createElement)(
             "div",
             { style: { marginTop: 8 } },
-            (0, import_react2.createElement)(
+            (0, import_react.createElement)(
               "label",
               { style: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } },
               t("lanAddress"),
-              (0, import_react2.createElement)(
+              (0, import_react.createElement)(
                 "select",
                 {
                   value: status?.lanIpOverride || "",
                   onChange: (e) => setLanAddress(e.target.value),
                   style: { font: "inherit", height: 30, padding: "0 8px", borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", background: "var(--dsw-alias-bg-layer-1,#fff)", color: "var(--dsw-alias-label-primary,inherit)" }
                 },
-                (0, import_react2.createElement)("option", { value: "" }, t("lanAddressAuto")),
-                (status?.lanCandidates || []).map((ip) => (0, import_react2.createElement)("option", { key: ip, value: ip }, ip))
+                (0, import_react.createElement)("option", { value: "" }, t("lanAddressAuto")),
+                (status?.lanCandidates || []).map((ip) => (0, import_react.createElement)("option", { key: ip, value: ip }, ip))
               )
             )
           ) : null
         )
-      ) : (0, import_react2.createElement)("div", { style: styles.muted }, t("lanStarting"))
+      ) : (0, import_react.createElement)("div", { style: styles.muted }, t("lanStarting"))
     ),
     // 公网：标题行自带 开启/关闭 → 开启后：二维码+地址、地址模式行、访问密码行
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: styles.block },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
-        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("wanAccess")),
-        publicRunning ? (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: stopTunnel }, t("stopTunnel")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t("opening") : fmt(t, "startChannel", { channel: channelLabel(willStartMode) }))
+        (0, import_react.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("wanAccess")),
+        publicRunning ? (0, import_react.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: stopTunnel }, t("stopTunnel")) : (0, import_react.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t("opening") : fmt(t, "startChannel", { channel: channelLabel(willStartMode) }))
       ),
-      tunnelStarting ? (0, import_react2.createElement)(
+      tunnelStarting ? (0, import_react.createElement)(
         "div",
         { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } },
         tunnelPhase === "downloading" ? fmt(t, "downloading", { s: elapsed(tunnelStateStarted) }) : fmt(t, "connecting", { s: elapsed(tunnelStateStarted), suffix: elapsed(tunnelStateStarted) > 30 ? t("slowHint") : "" })
-      ) : tunnelPhase === "error" ? (0, import_react2.createElement)(
+      ) : tunnelPhase === "error" ? (0, import_react.createElement)(
         "div",
         { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" } },
         fmt(t, "error", { detail: errText(tunnelStateDetail) || t("unknownError") })
-      ) : !publicRunning && !isDesktop ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 8 } }, t("wanOffHint")) : null,
+      ) : !publicRunning && !isDesktop ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 8 } }, t("wanOffHint")) : null,
       // 公网入口三选一（Quick/Named/SSH 互斥）：不依赖隧道是否在运行，随时可切换/配置
       row(
         t("modeLabel"),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)(
           "span",
           { style: { display: "inline-flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end", minWidth: 0 } },
-          (0, import_react2.createElement)("button", { style: modeBtnStyle(!namedActive && !sshActive), onClick: selectQuick }, t("modeQuick")),
-          (0, import_react2.createElement)("button", { style: modeBtnStyle(namedActive), onClick: selectNamed }, t("modeNamed")),
-          (0, import_react2.createElement)("button", { style: modeBtnStyle(sshActive), onClick: selectSsh }, t("modeSsh"))
+          (0, import_react.createElement)("button", { style: modeBtnStyle(!namedActive && !sshActive), onClick: selectQuick }, t("modeQuick")),
+          (0, import_react.createElement)("button", { style: modeBtnStyle(namedActive), onClick: selectNamed }, t("modeNamed")),
+          (0, import_react.createElement)("button", { style: modeBtnStyle(sshActive), onClick: selectSsh }, t("modeSsh"))
         ),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)(
           "div",
           { style: { marginTop: 6 } },
           // 选中了通道但还没保存：明确告知"点开始会先保存并启动哪条通道"，不再默默开成另一条
-          pendingModeHint ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, pendingModeHint) : null,
+          pendingModeHint ? (0, import_react.createElement)("div", { style: { ...styles.warn } }, pendingModeHint) : null,
           // 刚保存固定域名但当前连接仍是随机域名：需关闭后重新开启才生效
-          namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? "") ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedTakeEffect")) : null,
+          namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? "") ? (0, import_react.createElement)("div", { style: { ...styles.warn } }, t("namedTakeEffect")) : null,
           // 固定域名：已保存摘要 + 修改入口（非编辑态）
-          namedMode && !tunnelCfg ? (0, import_react2.createElement)(
+          namedMode && !tunnelCfg ? (0, import_react.createElement)(
             "div",
             { style: { ...styles.muted } },
             fmt(t, "namedSummary", { host: tunnelModeView.hostname || "\u2014", token: tunnelModeView.tokenSet ? t("namedTokenSet") : t("namedTokenMissing") }),
-            (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setTunnelCfg({ hostname: tunnelModeView.hostname ?? "", token: "", err: null }) }, t("namedEdit")),
-            (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("namedHow")),
-            !tunnelModeView.tokenSet || !tunnelModeView.hostname ? (0, import_react2.createElement)("div", { style: { marginTop: 2, color: "var(--dsw-alias-state-error-primary,#dc2626)" } }, t("namedNeedCfg")) : null
+            (0, import_react.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setTunnelCfg({ hostname: tunnelModeView.hostname ?? "", token: "", err: null }) }, t("namedEdit")),
+            (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("namedHow")),
+            !tunnelModeView.tokenSet || !tunnelModeView.hostname ? (0, import_react.createElement)("div", { style: { marginTop: 2, color: "var(--dsw-alias-state-error-primary,#dc2626)" } }, t("namedNeedCfg")) : null
           ) : null,
           // 固定域名：编辑表单（域名 + Tunnel Token，Token 留空保持不变）
-          tunnelCfg ? (0, import_react2.createElement)(
+          tunnelCfg ? (0, import_react.createElement)(
             "div",
             { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.6 } },
-            (0, import_react2.createElement)(
+            (0, import_react.createElement)(
               "div",
               null,
               t("namedHostnameLabel"),
-              (0, import_react2.createElement)("input", {
+              (0, import_react.createElement)("input", {
                 style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 200 },
                 placeholder: "pocket.example.com",
                 value: tunnelCfg.hostname ?? "",
@@ -3649,11 +1885,11 @@ function PocketSettingsTab({ rpcCall, t }) {
                 }
               })
             ),
-            (0, import_react2.createElement)(
+            (0, import_react.createElement)(
               "div",
               { style: { marginTop: 6 } },
               t("namedTokenLabel"),
-              (0, import_react2.createElement)("input", {
+              (0, import_react.createElement)("input", {
                 style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 240, fontFamily: "ui-monospace,Menlo,monospace" },
                 type: "password",
                 value: tunnelCfg.token ?? "",
@@ -3664,132 +1900,123 @@ function PocketSettingsTab({ rpcCall, t }) {
                 }
               })
             ),
-            (0, import_react2.createElement)(
+            (0, import_react.createElement)(
               "div",
               { style: { marginTop: 6, display: "flex", gap: 8 } },
-              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: saveNamedTunnel }, t("save")),
-              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => {
+              (0, import_react.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: saveNamedTunnel }, t("save")),
+              (0, import_react.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => {
                 setTunnelCfg(null);
                 if (!namedMode) setPendingMode(null);
               } }, t("cancel"))
             ),
-            (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("namedHow")),
-            (0, import_react2.createElement)("div", { style: { marginTop: 2, fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("namedSecurity")),
-            tunnelCfg.err ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(tunnelCfg.err)) : null
+            (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("namedHow")),
+            (0, import_react.createElement)("div", { style: { marginTop: 2, fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("namedSecurity")),
+            tunnelCfg.err ? (0, import_react.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(tunnelCfg.err)) : null
           ) : null
         )
       ),
       // SSH 通道：状态 + 地址/二维码 + 配置表单（选中 SSH 或正在编辑时显示）
       sshSection,
       // Quick/Named 运行中：二维码 + 防钓鱼提示（SSH 的二维码在 SSH 区块内）
-      tunnelUrl ? (0, import_react2.createElement)(
+      tunnelUrl ? (0, import_react.createElement)(
         "div",
         null,
         qrArea(status.tunnelQr, tunnelUrl, namedMode ? t("namedRunningHint") : t("wanHint")),
-        (0, import_react2.createElement)("div", { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, borderLeft: "4px solid var(--dsw-alias-state-warn-primary,#b45309)", background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", borderRadius: 8, padding: "8px 10px" } }, t("wanEphemeralWarn"))
+        (0, import_react.createElement)("div", { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, borderLeft: "4px solid var(--dsw-alias-state-warn-primary,#b45309)", background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", borderRadius: 8, padding: "8px 10px" } }, t("wanEphemeralWarn"))
       ) : null,
       // 访问密码行：值 + 自定义（公网共享 PIN，Quick/Named/SSH 三种通道共用；公网开启后显示）
       publicRunning && status?.accessToken ? row(
         t("pinLabel"),
-        customPin?.which === "public" ? null : (0, import_react2.createElement)(
+        customPin?.which === "public" ? null : (0, import_react.createElement)(
           "span",
           { style: { display: "inline-flex", alignItems: "center", gap: 8 } },
-          (0, import_react2.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.accessToken),
+          (0, import_react.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.accessToken),
           customBtn("public")
         ),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)(
           "div",
           { style: { marginTop: 6 } },
           customPin?.which === "public" ? customPinRow("public") : null,
-          status?.publicPinCustom ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("pinCustomHint")) : null,
-          namedMode ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedSecurity")) : null
+          status?.publicPinCustom ? (0, import_react.createElement)("div", { style: { ...styles.warn } }, t("pinCustomHint")) : null,
+          namedMode ? (0, import_react.createElement)("div", { style: { ...styles.warn } }, t("namedSecurity")) : null
         )
       ) : null
     ),
-    (0, import_react2.createElement)(
-      "div",
-      { style: styles.block },
-      row(
-        t("mobileRightbar"),
-        Switch(status?.mobileRightbarEnabled !== false, () => setMobileRightbar(status?.mobileRightbarEnabled === false)),
-        (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("mobileRightbarHint"))
-      )
-    ),
     // 通知与 PWA（task-6）：Web Push 订阅 + Webhook；旧宿主不返回 notify 字段时降级提示
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: styles.block },
-      (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("notifyTitle")),
-      !status ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanStarting")) : !notifyView ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("hostUnsupported")) : (0, import_react2.createElement)(
+      (0, import_react.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("notifyTitle")),
+      !status ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanStarting")) : !notifyView ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("hostUnsupported")) : (0, import_react.createElement)(
         "div",
         null,
         // Web Push 总开关 + 说明（浏览器推送依赖厂商服务，可能延迟）
         row(
           t("notifyPush"),
           Switch(notifyView.pushEnabled === true, () => setNotifyFlag("pushEnabled", notifyView.pushEnabled !== true)),
-          (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("notifyPushHint"))
+          (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("notifyPushHint"))
         ),
         // 订阅数量 + 本机订阅/取消（浏览器要求：必须在用户手势里调用）
         row(
           fmt(t, "notifySubsCount", { n: notifyView.subscriptionCount ?? 0 }),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "div",
             { style: styles.btnRow },
-            (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: subscribePush, disabled: notifyBusy || !pushApiReady }, t("notifySubscribe")),
-            (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: unsubscribePush, disabled: notifyBusy }, t("notifyUnsubscribe"))
+            (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: subscribePush, disabled: notifyBusy || !pushApiReady }, t("notifySubscribe")),
+            (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: unsubscribePush, disabled: notifyBusy }, t("notifyUnsubscribe"))
           ),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "div",
             null,
-            !pushApiReady ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, pushUnavailableText()) : null,
+            !pushApiReady ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, pushUnavailableText()) : null,
             // 有订阅时才给「清空全部订阅」（手机换浏览器/清数据后的残留订阅）
-            (notifyView.subscriptionCount ?? 0) > 0 ? (0, import_react2.createElement)(
+            (notifyView.subscriptionCount ?? 0) > 0 ? (0, import_react.createElement)(
               "div",
               { style: { marginTop: 6 } },
-              clearSubsAsk ? (0, import_react2.createElement)(
+              clearSubsAsk ? (0, import_react.createElement)(
                 "div",
                 { style: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" } },
-                (0, import_react2.createElement)("span", { style: { ...styles.warn, flex: "1 1 100%" } }, t("notifyClearConfirm")),
-                (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: clearSubscriptions, disabled: notifyBusy }, t("confirm")),
-                (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setClearSubsAsk(false) }, t("cancel"))
-              ) : (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setClearSubsAsk(true) }, t("notifyClear"))
+                (0, import_react.createElement)("span", { style: { ...styles.warn, flex: "1 1 100%" } }, t("notifyClearConfirm")),
+                (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: clearSubscriptions, disabled: notifyBusy }, t("confirm")),
+                (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: () => setClearSubsAsk(false) }, t("cancel"))
+              ) : (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: () => setClearSubsAsk(true) }, t("notifyClear"))
             ) : null
           )
         ),
         // 发送测试通知
         row(
           t("notifyTest"),
-          (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: sendTestNotification, disabled: notifyBusy }, notifyBusy ? t("notifyTesting") : t("notifyTest"))
+          (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: sendTestNotification, disabled: notifyBusy }, notifyBusy ? t("notifyTesting") : t("notifyTest"))
         ),
         // 网络自检：宿主进程侧的真实连通性（DNS/TCP/HTTP + 代理环境）
         row(
           t("notifyDiagnose"),
-          (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: runDiagnose, disabled: diagnoseBusy }, diagnoseBusy ? t("notifyDiagnosing") : t("notifyDiagnoseBtn")),
-          diagnoseData ? safeNode(() => (0, import_react2.createElement)(
+          (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: runDiagnose, disabled: diagnoseBusy }, diagnoseBusy ? t("notifyDiagnosing") : t("notifyDiagnoseBtn")),
+          diagnoseData ? safeNode(() => (0, import_react.createElement)(
             "div",
             { style: { ...styles.muted, marginTop: 6, wordBreak: "break-word", fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12, lineHeight: 1.6 } },
-            (0, import_react2.createElement)("div", null, fmt(t, "notifyDiagnoseEnv", {
+            (0, import_react.createElement)("div", null, fmt(t, "notifyDiagnoseEnv", {
               node: diagnoseData.env?.node ?? "\u2014",
               proxy: diagnoseData.env?.httpsProxy || diagnoseData.env?.httpProxy || t("notifyDiagnoseNoProxy"),
               useEnvProxy: diagnoseData.env?.useEnvProxy || "0"
             })),
-            ...(Array.isArray(diagnoseData.results) ? diagnoseData.results : []).map((r, i) => (0, import_react2.createElement)(
+            ...(Array.isArray(diagnoseData.results) ? diagnoseData.results : []).map((r, i) => (0, import_react.createElement)(
               "div",
               { key: `diag-${i}`, style: { marginTop: 3 } },
               `${r?.host ?? "?"}: ${r?.dns || "\u2014"} | TCP ${(Array.isArray(r?.tcp) ? r.tcp : []).map((x) => `IPv${x.family} ${x.ok ? `OK ${x.ms}ms` : `\u5931\u8D25(${x.error})`}`).join(" / ") || "\u2014"} | HTTPS ${r?.http ? r.http.ok ? `HTTP ${r.http.status}` : `\u5931\u8D25(${r.http.error})` : "\u2014"}`
             )),
-            diagnoseData.error ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR } }, errText(diagnoseData.error)) : null
+            diagnoseData.error ? (0, import_react.createElement)("div", { style: { color: COLOR_ERR } }, errText(diagnoseData.error)) : null
           )) : null
         ),
         // 最近推送结果：列出最近 5 条（含推送服务归属），避免只看到末条而误判
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)(
           "div",
           { style: { ...styles.muted, marginTop: 6, wordBreak: "break-word" } },
-          notifyRecent.length ? (0, import_react2.createElement)(
+          notifyRecent.length ? (0, import_react.createElement)(
             "div",
             null,
-            (0, import_react2.createElement)("div", null, t("notifyRecentTitle")),
-            ...notifyRecent.map((r, i) => (0, import_react2.createElement)("div", { key: `push-result-${i}`, style: { marginTop: 2 } }, resultText(r)))
+            (0, import_react.createElement)("div", null, t("notifyRecentTitle")),
+            ...notifyRecent.map((r, i) => (0, import_react.createElement)("div", { key: `push-result-${i}`, style: { marginTop: 2 } }, resultText(r)))
           ) : t("notifyNoResult")
         ),
         // 任务完成时推送（与 Webhook 无关的全局开关）
@@ -3798,19 +2025,19 @@ function PocketSettingsTab({ rpcCall, t }) {
         row(
           t("notifyWebhook"),
           Switch(notifyView.webhookEnabled === true, () => setNotifyFlag("webhookEnabled", notifyView.webhookEnabled !== true)),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "div",
             { style: { marginTop: 6 } },
-            (0, import_react2.createElement)("div", { style: { ...styles.muted } }, t("notifyWebhookHint")),
-            notifyView.webhookEnabled ? (0, import_react2.createElement)(
+            (0, import_react.createElement)("div", { style: { ...styles.muted } }, t("notifyWebhookHint")),
+            notifyView.webhookEnabled ? (0, import_react.createElement)(
               "div",
               null,
               sshField(
                 t("notifyPreset"),
-                (0, import_react2.createElement)(
+                (0, import_react.createElement)(
                   "select",
                   { style: styles.select, value: notifyForm.preset, onChange: (e) => patchNotifyForm({ preset: e.target.value }) },
-                  NOTIFY_PRESETS2.map(([value, key]) => (0, import_react2.createElement)("option", { key: value, value }, t(key)))
+                  NOTIFY_PRESETS2.map(([value, key]) => (0, import_react.createElement)("option", { key: value, value }, t(key)))
                 )
               ),
               sshField(t("notifyUrl"), sshInput(notifyForm.url, (v) => patchNotifyForm({ url: v.trim() }), { placeholder: "https://\u2026" })),
@@ -3824,10 +2051,10 @@ function PocketSettingsTab({ rpcCall, t }) {
                 sshInput(notifyForm.minInterval, (v) => patchNotifyForm({ minInterval: v }), { inputMode: "numeric", placeholder: t("notifyMinIntervalPlaceholder") }),
                 t("notifyMinIntervalHint")
               ),
-              (0, import_react2.createElement)(
+              (0, import_react.createElement)(
                 "div",
                 { style: { marginTop: 10 } },
-                (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: saveNotifyConfig, disabled: notifyBusy }, t("save"))
+                (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: saveNotifyConfig, disabled: notifyBusy }, t("save"))
               )
             ) : null
           )
@@ -3835,44 +2062,44 @@ function PocketSettingsTab({ rpcCall, t }) {
         // PWA 安装提示：可安装时给按钮，否则给一句为什么不可安装
         row(
           t("pwaRow"),
-          canInstall ? (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: promptInstall }, t("pwaInstall")) : null,
-          (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, canInstall ? null : pwaReason())
+          canInstall ? (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: promptInstall }, t("pwaInstall")) : null,
+          (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, canInstall ? null : pwaReason())
         )
       )
     ),
     // 通行密钥设备（task-6）：启用开关 + rpId + 设备列表（重命名/撤销）
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: styles.block },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
-        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("passkeyTitle")),
+        (0, import_react.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("passkeyTitle")),
         passkeyView ? Switch(passkeyView.enabled === true, () => setPasskeyEnabled(passkeyView.enabled !== true)) : null
       ),
-      !status ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanStarting")) : !passkeyView ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("hostUnsupported")) : (0, import_react2.createElement)(
+      !status ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanStarting")) : !passkeyView ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("hostUnsupported")) : (0, import_react.createElement)(
         "div",
         null,
-        (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("passkeyHint")),
+        (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("passkeyHint")),
         // 三态说明：非安全上下文 → 浏览器不支持 → 可用
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)(
           "div",
           { style: { marginTop: 6, fontSize: 12, lineHeight: 1.5, color: !webAuthn.secure || !webAuthn.supported ? COLOR_ERR : "var(--dsw-alias-label-tertiary,#8b93a1)" } },
           !webAuthn.secure ? t("passkeyInsecure") : !webAuthn.supported ? t("passkeyUnsupported") : t("passkeySecureHint")
         ),
-        // 在本设备注册通行密钥：入口常驻设置页（登录后的提示横幅可被关闭，关掉就找不到了）
+        // 在本设备注册通行密钥：入口仅位于插件设置页
         webAuthn.secure && webAuthn.supported && passkeyView.enabled === true ? row(
           t("passkeyRegister"),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "button",
             { style: styles.smallBtn, onClick: registerThisDevice, disabled: regBusy },
             regBusy ? t("passkeyRegistering") : t("passkeyRegisterBtn")
           ),
-          regMsg ? (0, import_react2.createElement)("div", { style: { marginTop: 4, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word", color: regMsg.ok ? COLOR_OK : COLOR_ERR } }, regMsg.text) : null
+          regMsg ? (0, import_react.createElement)("div", { style: { marginTop: 4, fontSize: 12, lineHeight: 1.5, wordBreak: "break-word", color: regMsg.ok ? COLOR_OK : COLOR_ERR } }, regMsg.text) : null
         ) : null,
         row(
           t("passkeyRpId"),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "span",
             { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12, wordBreak: "break-all" } },
             passkeyView.rpId || (typeof location !== "undefined" ? location.hostname : "\u2014")
@@ -3880,43 +2107,43 @@ function PocketSettingsTab({ rpcCall, t }) {
         ),
         row(
           fmt(t, "passkeyDeviceCount", { n: passkeyView.deviceCount ?? 0 }),
-          (0, import_react2.createElement)("button", { style: styles.smallBtn, onClick: loadDevices, disabled: passkeyBusy }, t("refresh"))
+          (0, import_react.createElement)("button", { style: styles.smallBtn, onClick: loadDevices, disabled: passkeyBusy }, t("refresh"))
         ),
         // 设备列表：名称 / 注册时间 / 最后登录 + 重命名/撤销（撤销两步确认，避免误触）
-        (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 12, marginTop: 10 } }, t("passkeyDevices")),
-        devicesErr ? (0, import_react2.createElement)("div", { style: { color: COLOR_ERR, fontSize: 12, marginTop: 6, wordBreak: "break-word" } }, fmt(t, "passkeyLoadFailed", { err: errText(devicesErr) })) : null,
-        devices && devices.length === 0 && !devicesErr ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("passkeyNoDevices")) : null,
-        (devices ?? []).map((d, i) => (0, import_react2.createElement)(
+        (0, import_react.createElement)("div", { style: { fontWeight: 600, fontSize: 12, marginTop: 10 } }, t("passkeyDevices")),
+        devicesErr ? (0, import_react.createElement)("div", { style: { color: COLOR_ERR, fontSize: 12, marginTop: 6, wordBreak: "break-word" } }, fmt(t, "passkeyLoadFailed", { err: errText(devicesErr) })) : null,
+        devices && devices.length === 0 && !devicesErr ? (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("passkeyNoDevices")) : null,
+        (devices ?? []).map((d, i) => (0, import_react.createElement)(
           "div",
           { key: String(d?.id ?? d?.credentialId ?? i), style: { borderTop: "1px solid var(--dsw-alias-border-l2,#e5e7eb)", paddingTop: 8, marginTop: 8 } },
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "div",
             { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" } },
-            (0, import_react2.createElement)("span", { style: { fontSize: 13, wordBreak: "break-word", minWidth: 0 } }, d?.name || t("passkeyUnnamed")),
-            (0, import_react2.createElement)(
+            (0, import_react.createElement)("span", { style: { fontSize: 13, wordBreak: "break-word", minWidth: 0 } }, d?.name || t("passkeyUnnamed")),
+            (0, import_react.createElement)(
               "div",
               { style: styles.btnRow },
-              (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => {
+              (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: () => {
                 setRevokeId(null);
                 setRenameId(d?.id);
                 setRenameVal(d?.name ?? "");
               } }, t("passkeyRename")),
-              (0, import_react2.createElement)("button", { style: { ...styles.miniBtn, color: COLOR_ERR }, onClick: () => {
+              (0, import_react.createElement)("button", { style: { ...styles.miniBtn, color: COLOR_ERR }, onClick: () => {
                 setRenameId(null);
                 setRevokeId(d?.id);
               } }, t("passkeyRevoke"))
             )
           ),
-          (0, import_react2.createElement)(
+          (0, import_react.createElement)(
             "div",
             { style: { ...styles.muted, marginTop: 2, wordBreak: "break-word" } },
             `${t("passkeyColCreated")}: ${fmtTime(d?.createdAt, "\u2014")} \xB7 ${t("passkeyColLastLogin")}: ${fmtTime(d?.lastLoginAt, t("passkeyNever"))}`
           ),
           // 重命名：内联输入，回车保存
-          renameId === d?.id ? (0, import_react2.createElement)(
+          renameId === d?.id ? (0, import_react.createElement)(
             "div",
             { style: { marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" } },
-            (0, import_react2.createElement)("input", {
+            (0, import_react.createElement)("input", {
               style: { ...styles.input, maxWidth: 180 },
               value: renameVal,
               autoFocus: true,
@@ -3927,108 +2154,108 @@ function PocketSettingsTab({ rpcCall, t }) {
                 if (e.key === "Escape") setRenameId(null);
               }
             }),
-            (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => doRenameDevice(d?.id) }, t("save")),
-            (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setRenameId(null) }, t("cancel"))
+            (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: () => doRenameDevice(d?.id) }, t("save")),
+            (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: () => setRenameId(null) }, t("cancel"))
           ) : null,
           // 撤销：先给后果说明，再确认
-          revokeId === d?.id ? (0, import_react2.createElement)(
+          revokeId === d?.id ? (0, import_react.createElement)(
             "div",
             { style: { marginTop: 6 } },
-            (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("passkeyRevokeConfirm")),
-            (0, import_react2.createElement)(
+            (0, import_react.createElement)("div", { style: { ...styles.warn } }, t("passkeyRevokeConfirm")),
+            (0, import_react.createElement)(
               "div",
               { style: { marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" } },
-              (0, import_react2.createElement)("button", { style: { ...styles.miniBtn, color: COLOR_ERR }, onClick: () => doRevokeDevice(d?.id) }, t("passkeyRevoke")),
-              (0, import_react2.createElement)("button", { style: styles.miniBtn, onClick: () => setRevokeId(null) }, t("cancel"))
+              (0, import_react.createElement)("button", { style: { ...styles.miniBtn, color: COLOR_ERR }, onClick: () => doRevokeDevice(d?.id) }, t("passkeyRevoke")),
+              (0, import_react.createElement)("button", { style: styles.miniBtn, onClick: () => setRevokeId(null) }, t("cancel"))
             )
           ) : null
         ))
       )
     ),
-    error ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, marginTop: 8 } }, `\u274C ${errText(error)}`) : null,
+    error ? (0, import_react.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, marginTop: 8 } }, `\u274C ${errText(error)}`) : null,
     // 恢复出厂设置：设置出问题时的临时兜底（最底部，避免误触）
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: styles.block },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
-        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("resetFactory")),
-        (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: () => setResetOpen(true) }, t("resetGo"))
+        (0, import_react.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("resetFactory")),
+        (0, import_react.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: () => setResetOpen(true) }, t("resetGo"))
       ),
-      (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("resetIntro"))
+      (0, import_react.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("resetIntro"))
     ),
     // 恢复出厂设置确认弹框
-    resetOpen ? (0, import_react2.createElement)(
+    resetOpen ? (0, import_react.createElement)(
       "div",
       { style: { position: "fixed", inset: 0, zIndex: 1e4, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { background: "var(--dsw-alias-bg-layer-1,#fff)", borderRadius: 12, maxWidth: 440, width: "100%", padding: "20px 22px", boxShadow: "0 8px 32px rgba(0,0,0,.18)" } },
-        (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 15, color: "var(--dsw-alias-state-warn-primary,#b45309)", marginBottom: 10 } }, t("resetTitle")),
-        (0, import_react2.createElement)("div", { style: { fontSize: 13, lineHeight: 1.7, color: "var(--dsw-alias-label-primary,inherit)", whiteSpace: "pre-line" } }, t("resetBody")),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)("div", { style: { fontWeight: 600, fontSize: 15, color: "var(--dsw-alias-state-warn-primary,#b45309)", marginBottom: 10 } }, t("resetTitle")),
+        (0, import_react.createElement)("div", { style: { fontSize: 13, lineHeight: 1.7, color: "var(--dsw-alias-label-primary,inherit)", whiteSpace: "pre-line" } }, t("resetBody")),
+        (0, import_react.createElement)(
           "div",
           { style: { display: "flex", gap: 8, marginTop: 16 } },
-          (0, import_react2.createElement)("button", { style: { ...styles.btn, flex: 1 }, onClick: () => setResetOpen(false) }, t("cancel")),
-          (0, import_react2.createElement)("button", { style: { ...styles.primary, flex: 1, background: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: doFactoryReset }, t("resetConfirm"))
+          (0, import_react.createElement)("button", { style: { ...styles.btn, flex: 1 }, onClick: () => setResetOpen(false) }, t("cancel")),
+          (0, import_react.createElement)("button", { style: { ...styles.primary, flex: 1, background: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: doFactoryReset }, t("resetConfirm"))
         )
       )
     ) : null,
     // Toast：重置等操作的即时反馈（固定屏幕正中央，2.6s 自动消失）
-    toast ? (0, import_react2.createElement)("div", {
+    toast ? (0, import_react.createElement)("div", {
       style: { position: "fixed", left: "50%", top: "50%", transform: "translate(-50%, -50%)", zIndex: 10001, width: "auto", maxWidth: 280, background: "rgba(17,24,39,.92)", color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontSize: 13, lineHeight: 1.5, textAlign: "center", boxShadow: "0 8px 24px rgba(0,0,0,.22)" }
     }, toast) : null,
     // 局域网访问开关确认弹框（关闭/打开时弹窗提醒）
-    lanToggleOpen !== null ? (0, import_react2.createElement)(
+    lanToggleOpen !== null ? (0, import_react.createElement)(
       "div",
       { style: { position: "fixed", inset: 0, zIndex: 1e4, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { background: "var(--dsw-alias-bg-layer-1,#fff)", borderRadius: 12, maxWidth: 420, width: "100%", padding: "20px 22px", boxShadow: "0 8px 32px rgba(0,0,0,.18)" } },
-        (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 15, color: lanToggleOpen ? "var(--dsw-alias-brand-primary,#4f6ef7)" : "var(--dsw-alias-state-warn-primary,#b45309)", marginBottom: 10 } }, t(lanToggleOpen ? "lanToggleTitleOn" : "lanToggleTitleOff")),
-        (0, import_react2.createElement)("div", { style: { fontSize: 13, lineHeight: 1.7, color: "var(--dsw-alias-label-primary,inherit)" } }, t(lanToggleOpen ? "lanToggleBodyOn" : "lanToggleBodyOff")),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)("div", { style: { fontWeight: 600, fontSize: 15, color: lanToggleOpen ? "var(--dsw-alias-brand-primary,#4f6ef7)" : "var(--dsw-alias-state-warn-primary,#b45309)", marginBottom: 10 } }, t(lanToggleOpen ? "lanToggleTitleOn" : "lanToggleTitleOff")),
+        (0, import_react.createElement)("div", { style: { fontSize: 13, lineHeight: 1.7, color: "var(--dsw-alias-label-primary,inherit)" } }, t(lanToggleOpen ? "lanToggleBodyOn" : "lanToggleBodyOff")),
+        (0, import_react.createElement)(
           "div",
           { style: { display: "flex", gap: 8, marginTop: 16 } },
-          (0, import_react2.createElement)("button", { style: { ...styles.btn, flex: 1 }, onClick: () => setLanToggleOpen(null) }, t("cancel")),
-          (0, import_react2.createElement)("button", { style: { ...styles.primary, flex: 1 }, onClick: confirmLanToggle }, t("confirm"))
+          (0, import_react.createElement)("button", { style: { ...styles.btn, flex: 1 }, onClick: () => setLanToggleOpen(null) }, t("cancel")),
+          (0, import_react.createElement)("button", { style: { ...styles.primary, flex: 1 }, onClick: confirmLanToggle }, t("confirm"))
         )
       )
     ) : null,
     // 安全免责声明弹框（issue #31）：每次开启公网访问前确认
-    disclaimerOpen ? (0, import_react2.createElement)(
+    disclaimerOpen ? (0, import_react.createElement)(
       "div",
       { style: { position: "fixed", inset: 0, zIndex: 1e4, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "div",
         { style: { background: "var(--dsw-alias-bg-layer-1,#fff)", borderRadius: 12, maxWidth: 420, width: "100%", padding: "20px 22px", boxShadow: "0 8px 32px rgba(0,0,0,.18)" } },
-        (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 15, color: "var(--dsw-alias-state-warn-primary,#b45309)", marginBottom: 10 } }, t("disclaimerTitle")),
-        (0, import_react2.createElement)("div", { style: { fontSize: 13, lineHeight: 1.7, color: "var(--dsw-alias-label-primary,inherit)" } }, t("disclaimerBody")),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)("div", { style: { fontWeight: 600, fontSize: 15, color: "var(--dsw-alias-state-warn-primary,#b45309)", marginBottom: 10 } }, t("disclaimerTitle")),
+        (0, import_react.createElement)("div", { style: { fontSize: 13, lineHeight: 1.7, color: "var(--dsw-alias-label-primary,inherit)" } }, t("disclaimerBody")),
+        (0, import_react.createElement)(
           "label",
           { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 14, fontSize: 13, cursor: "pointer" } },
-          (0, import_react2.createElement)("input", { type: "checkbox", checked: disclaimerChecked, onChange: (e) => setDisclaimerChecked(e.target.checked), style: { width: 16, height: 16 } }),
+          (0, import_react.createElement)("input", { type: "checkbox", checked: disclaimerChecked, onChange: (e) => setDisclaimerChecked(e.target.checked), style: { width: 16, height: 16 } }),
           t("disclaimerAgree")
         ),
-        (0, import_react2.createElement)(
+        (0, import_react.createElement)(
           "div",
           { style: { display: "flex", gap: 8, marginTop: 16 } },
-          (0, import_react2.createElement)("button", { style: { ...styles.btn, flex: 1 }, onClick: () => setDisclaimerOpen(false) }, t("cancel")),
-          (0, import_react2.createElement)("button", {
+          (0, import_react.createElement)("button", { style: { ...styles.btn, flex: 1 }, onClick: () => setDisclaimerOpen(false) }, t("cancel")),
+          (0, import_react.createElement)("button", {
             style: { ...styles.primary, flex: 1, opacity: disclaimerChecked ? 1 : 0.5 },
             disabled: !disclaimerChecked,
             onClick: confirmDisclaimer
           }, t("disclaimerAgree"))
         ),
-        !disclaimerChecked ? (0, import_react2.createElement)("div", { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" } }, t("disclaimerHint")) : null
+        !disclaimerChecked ? (0, import_react.createElement)("div", { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" } }, t("disclaimerHint")) : null
       )
     ) : null,
     // 页面最底部：反馈入口
-    (0, import_react2.createElement)(
+    (0, import_react.createElement)(
       "div",
       { style: { ...styles.block, textAlign: "center" } },
-      (0, import_react2.createElement)(
+      (0, import_react.createElement)(
         "a",
         { href: "https://github.com/shaobeichen/dsh-pocket/issues", target: "_blank", rel: "noreferrer", style: { fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", textDecoration: "none" } },
         t("feedback")
@@ -4037,20 +2264,9 @@ function PocketSettingsTab({ rpcCall, t }) {
   );
 }
 function apply(ctx) {
-  if (ctx?.connection) {
-    try {
-      Object.defineProperty(ctx.connection, "isLoopback", { value: true, writable: true, configurable: true });
-    } catch {
-      try {
-        ctx.connection.isLoopback = true;
-      } catch {
-      }
-    }
-  }
-  mobileApply(ctx);
   const rpcCall = (endpoint, payload, signal) => ctx.connection.rpc.call(POCKET_RPC_CHANNEL, endpoint, payload, signal);
-  const translate = ctx.locale.bind(NS2);
-  ctx.effect(() => ctx.locale.register(NS2, { zh: zh2, en: en2 }), "dsh-pocket: pocket locale dictionaries");
+  const translate = ctx.locale.bind(NS);
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-pocket: pocket locale dictionaries");
   ctx.slots.inject(
     "settings.section",
     () => ctx.slots.register(

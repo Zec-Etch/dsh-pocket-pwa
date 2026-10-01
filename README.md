@@ -39,6 +39,8 @@ DSH Pocket 就是干这个的：**装上它，手机扫个码，就能实时看�
   <img src="docs/interface.jpg" alt="手机上的 DSH 界面" width="100%">
 </p>
 
+本插件在所有屏幕上保持宿主原版 WebUI：不添加侧边栏按钮、不改抽屉布局或样式、不拦截文件点击。通行密钥注册入口位于插件的「手机访问」设置页。
+
 ## ✨ 特性
 
 | 特性                    | 说明                                                                                                                                                                               |
@@ -55,9 +57,6 @@ DSH Pocket 就是干这个的：**装上它，手机扫个码，就能实时看�
 | 🔑 自定义密码           | 公网/局域网密码都可在设置页**设成自己固定的 8–64 位密码（英文字母大小写或数字）**（自定义后公网不再自动换新）                                                                         |
 | 🧘 会话保持             | 手机输一次密码后**长期免输**（登录状态绑定电脑上的 dsh web 进程：只要它不重启，手机不用再输；**dsh web 重启/更新后需重新输入一次**）                                               |
 | ⚡ 实时同步             | 流式输出走 WebSocket 全透传——**电脑上在输出，手机上同步在滚**，可双向操作；内置心跳保活（防路由器 NAT/省电机制静默断链，断线自动重连）                                             |
-| 📱 移动端适配           | 窄屏自动变抽屉布局（移植 dsh-web-mobile，MIT）：侧栏抽屉、会话全宽、状态栏安全区、触控优化                                                                                         |
-| 🧭 可选右边栏           | 手机端显示原生右边栏入口；普通手机可在设置中关闭以保持紧凑，折叠屏展开后可更方便地同时使用终端底栏和右边栏                                                                         |
-| 📁 文件浏览             | 移动端「文件浏览」入口需要宿主提供 explorer 面板（dsh-web-ui 组件）；官方 DSH 未内置时入口自动隐藏，不会出现"点了没反应"                                                           |
 | 🗜️ 传输压缩             | 大 JSON 响应自动 gzip/brotli（长会话 17MB → ~1MB，brotli 质量 6：快且省流量），手机加载更快、更省流量                                                                              |
 | 🔁 隧道自动恢复         | DSH 重启后自动重新拉起之前开着的公网入口（SSH 通道可用「DSH 重启后自动恢复」开关关掉）                                                                                             |
 | 🧩 零依赖安装           | 一个 npm 包、一个设置页，没有核心/适配器要分开装；不需要账号，也不需要服务器（**可选**用自有 VPS 走 SSH 通道）                                                                      |
@@ -346,7 +345,7 @@ SSH 通道的「访问协议 / 访问域名 / 访问端口」只影响**二维�
 | `lib/notify-hook.mjs`| 任务完成通知：`turn/end` + agent 空闲判定、子代理过滤、去抖、发送与最近结果                                                                                                            |
 | `lib/tunnel.mjs`     | cloudflared：多镜像源下载（清华优先）/自适应多线程/启动/解析公网 URL（HTTP/2）                                                                                                     |
 | `lib/web-rpc.js`     | loopback RPC：`status` / `tunnel.*` / `lan.*` / `ssh.*` / `notify.*` / `passkey.*` / `version` / `update` / `restart`                                                                |
-| `client/`            | 设置页「手机访问」（三通道 + PWA/通知 + 通行密钥设备）+ 移动端适配（dsh-web-mobile 移植）                                                                                              |
+| `client/`            | 设置页「手机访问」（三通道 + PWA/通知 + 通行密钥设备）                                                                                              |
 | `bin/dsh-pocket.mjs` | CLI：局域网/公网模式，打印 URL + 二维码                                                                                                                                            |
 
 ## 🛠 开发
@@ -361,14 +360,12 @@ npm test                # 代理 / 认证 / 隧道 / SSH / 推送 / 通行密钥
 
 ## 🤝 致谢
 
-- 移动端适配移植自 [mexiaosqwq/dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile)（MIT）
 - 公网隧道基于 [cloudflared](https://github.com/cloudflare/cloudflared)
 
 ## 📄 License
 
 [GPL-2.0](LICENSE) —— 自由软件许可：可自由使用、修改、分发，但**修改版必须同样以 GPL 开源**并保留版权声明；商用同样适用。
 
-> 说明：移动端适配部分移植自 [dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile)（MIT 许可，兼容 GPL），其版权声明保留在 `client/mobile/LICENSE.dsh-web-mobile`。
 
 ---
 

@@ -80,19 +80,6 @@ test('真实链路：RPC status 走真实 service（含 restartNotice）', async
   }
 });
 
-test('client bundle 注入 React 绑定（PR #1 回归：mobile 组件曾 React is not defined）', async () => {
-  // DSH 模块系统提供 react 为模块、非全局；esbuild classic JSX 生成 React.createElement，
-  // 若 factory 不绑定 React，mobile 组件（抽屉布局）渲染即崩、移动端适配永远不激活。
-  const { readFileSync } = await import('node:fs');
-  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
-  assert.ok(src.includes('var React = require("react")'), 'factory 注入 React 绑定');
-  // 匹配实际调用形式（带左括号），避免命中 build.mjs 注释里的字面量
-  assert.ok(src.includes('React.createElement('), 'bundle 内存在 JSX 编译产物（需要 React 绑定）');
-  const injectIdx = src.indexOf('var React = require("react")');
-  const createIdx = src.indexOf('React.createElement(');
-  assert.ok(injectIdx !== -1 && createIdx !== -1 && injectIdx < createIdx, 'React 声明先于使用');
-});
-
 test('client bundle：status 访问必须可选链（回归：1.9.0 白屏——首次渲染 status=null 时裸 status.lanAuthEnabled 抛 TypeError）', async () => {
   // load() 是异步的：首次渲染时 status 为 null。LAN 开关行渲染在 lanUrl 安全分支之外，
   // 1.9.0 在这里裸访问 status.lanAuthEnabled → React 整树崩溃 → 设置页白屏。
@@ -103,45 +90,11 @@ test('client bundle：status 访问必须可选链（回归：1.9.0 白屏——
   assert.ok(src.includes('status?.lanAuthEnabled'), 'bundle 存在可选链访问');
 });
 
-test('移动导航 backdrop（issue #38）：点击穿透不抢抽屉内点击 + 抽屉外点击关闭保留', async () => {
-  const { readFileSync } = await import('node:fs');
-  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
-  // CSS：backdrop 必须 pointer-events: none（纯压暗层，不接收点击）
-  const css = src.match(/\[data-mobile-nav="backdrop"\][^}]*}/)?.[0] ?? '';
-  assert.ok(css.includes('pointer-events: none'), 'backdrop 点击穿透');
-  // JSX：backdrop 是纯视觉 div（无 role/onClick）
-  assert.ok(src.includes('"data-mobile-nav": "backdrop"'), 'backdrop 纯视觉渲染');
-  // 关闭逻辑：抽屉内导航关闭 + 抽屉外点击关闭（两套 document capture contains 处理）
-  assert.ok((src.match(/contains\(target\)/g) || []).length >= 2, '存在抽屉内外两套点击处理');
-  // 抽屉层级（PR #42 / issue #67）：必须高于第三方插件对 shell overlay 层的
-  // 抬升（500），也要压过 @linxin666/dsh-web-ui-all 的移动端层（sidebar pane
-  // 1100、details pane 1000、frame ::after 全屏遮罩 1050）。
-  // 直接断言 bundle 中抽屉规则的 z-index: 1200（若退回 40/600 则此处失败）
-  assert.ok(
-    src.includes('z-index: 1200 !important'),
-    '抽屉 z-index 1200（高于 overlay 抬升 500 与 web-ui-all 的 1100/1050）',
-  );
-  assert.ok(!src.includes('z-index: 40 !important'), '不再用 40（会被第三方抬升的 overlay 盖住）');
-  assert.ok(!src.includes('z-index: 600 !important'), '不再用 600（会被 web-ui-all 的 1050 遮罩盖住）');
-});
-
 test('公网免责声明（issue #31）：bundle 含弹框与勾选逻辑，RPC 必须带 disclaimer 确认', async () => {
   const { readFileSync } = await import('node:fs');
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
   assert.ok(src.includes('disclaimer'), 'bundle 含免责声明逻辑');
   assert.ok(src.includes('disclaimer: true'), '开启公网带免责声明确认参数');
-});
-
-test('文件浏览（issue #48）：宿主无 aionui explorer 时隐藏入口；点 Files 关抽屉', async () => {
-  const { readFileSync } = await import('node:fs');
-  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
-  // 检测逻辑：frame 打 data-mobile-nav-explorer 标记
-  assert.ok(src.includes('data-mobile-nav-explorer'), '存在 explorer 可用性检测标记');
-  // 隐藏 CSS：无 explorer 时隐藏 files/explorer 入口
-  assert.ok(src.includes('[data-mobile-nav-explorer="0"] [data-mobile-nav="files"]'), '无 explorer 隐藏 header Files');
-  assert.ok(src.includes('[data-mobile-nav-explorer="0"] [data-mobile-nav="explorer"]'), '无 explorer 隐藏 drawer 入口');
-  // 点 Files 关闭抽屉（抽屉 z600 会盖住 explorer sheet，且 sheet 外点击会被吃掉）
-  assert.ok(src.includes('[data-mobile-nav="files"]'), 'Files 纳入抽屉内导航关闭');
 });
 
 test('Windows 更新 spawn（PR #54）：performUpdate 的 spawn 必须带 shell 选项', async () => {

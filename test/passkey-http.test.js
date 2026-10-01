@@ -8,6 +8,7 @@
 //   D-2 存储写失败的 fs 异常（含绝对路径）不得回给客户端，原文只进服务端日志；
 //   D-3 受保护 Host 上宿主 getToken() 返回空值时必须 fail closed（HTTP 与 WS 两条入口一致）。
 
+import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
@@ -270,6 +271,7 @@ test('D-1 对照：HTTPS 固定域名注册仍然 200，设备 cookie 带 Secure
 
     const credentialId = randomBytes(16);
     const registration = authr.register({ rpId: DOMAIN, challenge: begin.json.challenge, origin: `https://${DOMAIN}`, credentialId });
+    registration.response.transports = ['internal', 'hybrid'];
     const finish = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerFinish, {
       flowId: begin.json.flowId, ...registration, name: '我的手机',
     }, { cookie: session });
@@ -285,6 +287,7 @@ test('D-1 对照：HTTPS 固定域名注册仍然 200，设备 cookie 带 Secure
     assert.match(cookie, /; Secure/, 'HTTPS 下必须带 Secure');
     assert.equal(f.store.list().length, 1, '凭据入库');
     assert.equal(f.store.list()[0].id, b64u(credentialId));
+    assert.deepEqual(f.store.list()[0].transports, ['internal', 'hybrid']);
   } finally {
     await f.close();
   }
@@ -588,3 +591,58 @@ test('P8.1：login 侧不设 https 门槛（记录实测），但任何情况下
     await f.close();
   }
 });
+
+for (const variant of ['absent', 'throwing', 'empty', 'standard']) {
+  test('login page browser script verifies real assertion with ' + variant + ' toJSON', async () => {
+    const f = await fixture();
+    try {
+      const authr = softwareAuthenticator();
+      const { session } = await loginWithPin(f.proxy.port, DOMAIN, PIN);
+      const begin = await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerBegin, {}, { cookie: session });
+      const credentialId = randomBytes(16);
+      const registration = authr.register({ rpId: DOMAIN, challenge: begin.json.challenge, origin: 'https://' + DOMAIN, credentialId });
+      assert.equal((await postJson(f.proxy.port, DOMAIN, PASSKEY_PATHS.registerFinish,
+        { flowId: begin.json.flowId, ...registration }, { cookie: session })).status, 200);
+      const page = await getPath(f.proxy.port, DOMAIN, '/');
+      const source = page.body.match(/<script>([\s\S]*?)<\/script>/)[1];
+      let click, redirected;
+      let finishCount = 0;
+      const btn = { style: {}, addEventListener: (_, fn) => { click = fn; } };
+      const out = { textContent: '' };
+      let done;
+      const settled = new Promise((resolve) => { done = resolve; });
+      Object.defineProperty(out, 'textContent', { set(value) { if (value) done(value); }, get() { return ''; } });
+      runInNewContext(source, {
+        window: { PublicKeyCredential() {} }, document: { getElementById: (id) => id === 'pk' ? btn : out },
+        location: { replace: (url) => { redirected = url; done(); } }, atob, btoa, Uint8Array, ArrayBuffer,
+        navigator: { credentials: { get: async ({ publicKey }) => {
+          const json = authr.assert({ rpId: DOMAIN, challenge: b64u(publicKey.challenge), origin: 'https://' + DOMAIN, credentialId });
+          const response = {};
+          for (const [key, value] of Object.entries(json.response)) {
+            const buffer = Uint8Array.from(Buffer.from(value, 'base64url')).buffer;
+            Object.defineProperty(response, key, { get: () => buffer });
+          }
+          const cred = {};
+          for (const [key, value] of Object.entries({ id: json.id, rawId: Uint8Array.from(credentialId).buffer, type: 'public-key', response })) {
+            Object.defineProperty(cred, key, { get: () => value });
+          }
+          if (variant !== 'absent') cred.toJSON = () => {
+            if (variant === 'throwing') throw Error('unsupported');
+            return variant === 'standard' ? json : {};
+          };
+          return cred;
+        } } },
+        fetch: async (url, init) => {
+          if (url.endsWith('/finish')) finishCount++;
+          const res = await postJson(f.proxy.port, DOMAIN, url, JSON.parse(init.body));
+          return { ok: res.status === 200, status: res.status, json: async () => res.json };
+        },
+      });
+      click();
+      const error = await settled;
+      assert.equal(error, undefined);
+      assert.equal(finishCount, 1);
+      assert.equal(redirected, '/?dsh-pocket-auth=1');
+    } finally { await f.close(); }
+  });
+}

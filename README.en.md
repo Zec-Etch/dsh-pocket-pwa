@@ -39,6 +39,8 @@ What it looks like — the phone shows the exact same UI as your computer, live:
   <img src="docs/interface.jpg" alt="DSH UI on the phone" width="100%">
 </p>
 
+The plugin preserves the host's original WebUI on every screen: no custom sidebar buttons, drawer layout, styles or file-click interception.
+
 ## ✨ Features
 
 | Feature                      | Description                                                                                                                                                                                                                                                                       |
@@ -55,9 +57,6 @@ What it looks like — the phone shows the exact same UI as your computer, live:
 | 🔑 Custom PINs               | Both the public and LAN PINs can be **set to a fixed 8–64-character PIN using letters and digits in Settings** (custom PINs are never auto-rotated)                                                                                                                               |
 | 🧘 Session persistence       | Enter the PIN once and you're set for a long time (login is tied to the computer's dsh web process: as long as it stays up, the phone won't ask again; **after a dsh web restart/update, enter it once more**)                                                                    |
 | ⚡ Real-time sync            | Streaming output passes through WebSocket untouched — what the computer renders, the phone renders live; fully interactive both ways; built-in WS heartbeat keep-alive (defeats silent NAT/battery link drops with auto-reconnect)                                                |
-| 📱 Mobile-adaptive layout    | Narrow screens get a drawer layout automatically (ported from dsh-web-mobile, MIT): sidebar drawer, full-width conversation, safe-area insets, touch optimizations                                                                                                                |
-| 🧭 Optional right sidebar    | Shows the native right-sidebar entry on mobile; disable it for a compact phone header or keep it available alongside the terminal dock on an unfolded display                                                                                                                     |
-| 📁 File browser              | The mobile "Files" entries need a host-side explorer panel (a dsh-web-ui component); on stock DSH without it the entries are auto-hidden instead of doing nothing                                                                                                                 |
 | 🗜️ Transfer compression      | Large JSON responses are gzip/brotli'd on the fly (17MB session history → ~1MB; brotli quality 6: fast and bandwidth-friendly) — faster loads, less mobile data                                                                                                                   |
 | 🔁 Tunnel auto-restore       | After a DSH restart the previously-running public entry comes back automatically (the SSH channel can opt out with its own "auto-restore" switch)                                                                                                                                  |
 | 🧩 Zero-dependency install   | One npm package, one settings tab — no core/adapter split and no account needed; no server needed either (**optional**: bring your own VPS for the SSH channel)                                                                                                                     |
@@ -344,7 +343,7 @@ Such tools take over all traffic and often cut cloudflared's tunnel-edge connect
 | `lib/notify-hook.mjs`| Task-completion notifications: `turn/end` + agent-idle detection, sub-agent filtering, debounce, delivery and last results                                                                                                   |
 | `lib/tunnel.mjs`     | cloudflared: multi-mirror download (Tsinghua first) / adaptive parallel / start / parse public URL (HTTP/2)                                                                                                                  |
 | `lib/web-rpc.js`     | Loopback RPC: `status` / `tunnel.*` / `lan.*` / `ssh.*` / `notify.*` / `passkey.*` / `version` / `update` / `restart`                                                                                                        |
-| `client/`            | "Phone access" settings tab (three channels + PWA/notifications + passkey devices) + mobile adaptation (dsh-web-mobile port)                                                                                                 |
+| `client/`            | "Phone access" settings tab (three channels + PWA/notifications + passkey devices)                                                                                                 |
 | `bin/dsh-pocket.mjs` | CLI: LAN/public modes, prints URL + QR                                                                                                                                                                                       |
 
 ## 🛠 Development
@@ -359,14 +358,12 @@ npm test                # proxy / auth / tunnel / SSH / push / passkeys / settin
 
 ## 🤝 Credits
 
-- Mobile adaptation ported from [mexiaosqwq/dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile) (MIT)
 - Public tunnel powered by [cloudflared](https://github.com/cloudflare/cloudflared)
 
 ## 📄 License
 
 [GPL-2.0](LICENSE) — copyleft: free to use, modify, and redistribute, but **derivatives must stay GPL** and keep the copyright notice; commercial use included.
 
-> Note: the mobile-adaptation portion is ported from [dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile) (MIT, GPL-compatible); its copyright notice stays in `client/mobile/LICENSE.dsh-web-mobile`.
 
 ---
 
